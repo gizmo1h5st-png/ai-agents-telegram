@@ -141,9 +141,11 @@ def run_discussion_step(self, task_id: int):
             conn.close()
             return {"status": "error", "reason": "Task not found"}
         
-        if task["status"] not in ("pending", "in_progress"):
+        # Нормализуем статус (может быть PENDING, pending, TaskStatus.PENDING)
+        status = str(task["status"]).lower().replace("taskstatus.", "")
+        if status not in ("pending", "in_progress"):
             conn.close()
-            return {"status": "skipped", "reason": f"Task status: {task['status']}"}
+            return {"status": "skipped", "reason": f"Task status: {status}"}
         
         if task["current_step"] >= task["max_steps"]:
             cur.execute(
