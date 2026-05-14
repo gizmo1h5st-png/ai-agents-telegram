@@ -177,7 +177,13 @@ def run_discussion_step(self, task_id):
             role = "assistant" if m["role"] != "user" else "user"
             llm_messages.append({"role": role, "content": m["content"]})
 
-        response = call_openrouter(agent["prompt"], llm_messages, task["description"])
+              response = call_openrouter(agent["prompt"], llm_messages, task["description"])
+        
+        # Если ошибка - останавливаем
+        if response.startswith("❌") or response.startswith("⏸"):
+            conn.close()
+            send_telegram_message(task["chat_id"], f"⚠️ {response}")
+            return {"status": "error", "reason": response}
 
         content = f"{agent['emoji']} <b>{agent['name']}:</b>\n{response}"
 
