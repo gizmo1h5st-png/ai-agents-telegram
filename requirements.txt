@@ -21,4 +21,4 @@ python-dotenv==1.0.0
 # Production
 gunicorn==21.2.0
 
-ddgs==7.0.0
+ddgs==9.14.2
