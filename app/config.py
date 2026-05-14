@@ -38,18 +38,12 @@ class Settings(BaseSettings):
 settings = Settings()
 
 FREE_MODELS = {
-    "deepseek-v4": {"id": "deepseek/deepseek-v4-flash:free", "name": "🚀 DeepSeek V4 Flash", "desc": "Быстрая и стабильная"},
+    "deepseek": {"id": "deepseek/deepseek-v4-flash:free", "name": "🚀 DeepSeek V4", "desc": "Быстрая и стабильная"},
     "nemotron": {"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "name": "🟢 Nemotron 30B", "desc": "Reasoning от NVIDIA"},
-    "trinity": {"id": "arcee-ai/trinity-large-thinking:free", "name": "🔺 Trinity Thinking", "desc": "Глубокое мышление"},
+    "trinity": {"id": "arcee-ai/trinity-large-thinking:free", "name": "🔺 Trinity", "desc": "Глубокое мышление"},
     "laguna": {"id": "poolside/laguna-xs.2:free", "name": "🏊 Laguna XS.2", "desc": "От Poolside"},
     "owl": {"id": "openrouter/owl-alpha", "name": "🦉 Owl Alpha", "desc": "Экспериментальная"},
-    "minimax": {"id": "minimax/minimax-m2.5:free", "name": "🔷 MiniMax M2.5", "desc": "Модель MiniMax"},
-    "lfm-thinking": {"id": "liquid/lfm-2.5-1.2b-thinking:free", "name": "💭 LFM Thinking", "desc": "Thinking от Liquid"},
-    "lfm-instruct": {"id": "liquid/lfm-2.5-1.2b-instruct:free", "name": "📝 LFM Instruct", "desc": "Instruct от Liquid"},
-    "gpt-oss-120b": {"id": "openai/gpt-oss-120b:free", "name": "🤖 GPT-OSS 120B", "desc": "Большая open-source"},
-    "gpt-oss-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная open-source"},
-    "glm-4": {"id": "zhipu-ai/glm-4.5-air:free", "name": "🇨🇳 GLM-4.5 Air", "desc": "От Zhipu AI"},
-    "qwen-coder": {"id": "qwen/qwen3-coder:free", "name": "💻 Qwen3 Coder", "desc": "Для кода"},
-    "dolphin": {"id": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free", "name": "🐬 Dolphin 24B", "desc": "Uncensored"},
-    "hermes": {"id": "nousresearch/hermes-3-llama-3.1-405b:free", "name": "⚡ Hermes 3 405B", "desc": "Огромная от NousResearch"},
+    "gpt-120b": {"id": "openai/gpt-oss-120b:free", "name": "🤖 GPT-OSS 120B", "desc": "Большая open-source"},
+    "gpt-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная open-source"},
+    "lfm": {"id": "liquid/lfm-2.5-1.2b-instruct:free", "name": "💧 LFM Instruct", "desc": "От Liquid AI"},
 }
