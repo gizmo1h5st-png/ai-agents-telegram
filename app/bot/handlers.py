@@ -173,32 +173,25 @@ async def search_handler(message: Message):
     status_msg = await message.answer(f"🔍 Ищу: <i>{query_text}</i>...", parse_mode="HTML")
     
     try:
-        import httpx
-        with httpx.Client(timeout=10) as client:
-            resp = client.get("https://api.duckduckgo.com/", params={
-                "q": query_text,
-                "format": "json",
-                "no_html": 1,
-                "skip_disambig": 1
-            })
-            data = resp.json()
-            
-            results = []
-            if data.get("Abstract"):
-                results.append(data["Abstract"])
-            for topic in data.get("RelatedTopics", [])[:5]:
-                if isinstance(topic, dict) and topic.get("Text"):
-                    results.append(topic["Text"])
-            
-            if results:
-                text = f"🔍 <b>Результаты: {query_text}</b>\n\n"
-                for i, r in enumerate(results[:5], 1):
-                    text += f"{i}. {r}\n\n"
-                await status_msg.edit_text(text, parse_mode="HTML")
-            else:
-                await status_msg.edit_text(f"🔍 Нет результатов по: <i>{query_text}</i>", parse_mode="HTML")
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query_text, max_results=5):
+                title = r.get("title", "")
+                body = r.get("body", "")
+                link = r.get("href", "")
+                results.append(f"<b>{title}</b>\n{body}\n🔗 {link}")
+        
+        if results:
+            text = f"🔍 <b>Результаты: {query_text}</b>\n\n"
+            text += "\n\n".join(results[:5])
+            await status_msg.edit_text(text, parse_mode="HTML")
+        else:
+            await status_msg.edit_text(f"🔍 Нет результатов: <i>{query_text}</i>", parse_mode="HTML")
     except Exception as e:
         await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+
+        
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
     if not is_allowed(message.from_user.id):
