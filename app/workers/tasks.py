@@ -148,8 +148,8 @@ def run_discussion_step(self, task_id: int):
             return {"status": "skipped", "reason": f"Task status: {status}"}
         
         if task["current_step"] >= task["max_steps"]:
-            cur.execute(
-                "UPDATE tasks SET status = 'completed', final_answer = %s WHERE id = %s",
+                    cur.execute(
+                "UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s",
                 ("Достигнут лимит шагов.", task_id)
             )
             conn.commit()
@@ -180,20 +180,18 @@ def run_discussion_step(self, task_id: int):
         cur.execute(
             "INSERT INTO messages (task_id, role, content) VALUES (%s, %s, %s)",
             (task_id, agent_key, content)
-        )
-        cur.execute(
-            "UPDATE tasks SET current_step = %s, status = 'in_progress' WHERE id = %s",
+            cur.execute(
+            "UPDATE tasks SET current_step = %s, status = 'IN_PROGRESS' WHERE id = %s",
             (task["current_step"] + 1, task_id)
         )
-        conn.commit()
         
         send_telegram_message(task["chat_id"], content)
         
         is_final = "[ФИНАЛЬНЫЙ ОТВЕТ]" in response or "[FINAL]" in response
         
         if is_final:
-            cur.execute(
-                "UPDATE tasks SET status = 'completed', final_answer = %s WHERE id = %s",
+                    cur.execute(
+                "UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s",
                 (response, task_id)
             )
             conn.commit()
