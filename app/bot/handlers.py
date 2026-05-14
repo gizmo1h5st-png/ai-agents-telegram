@@ -213,6 +213,28 @@ async def templates_handler(message: Message):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
+
+@router.callback_query(F.data.startswith("template:"))
+async def template_callback(callback: CallbackQuery):
+    template_key = callback.data.split(":")[1]
+    
+    if template_key not in TASK_TEMPLATES:
+        await callback.answer("❌ Шаблон не найден", show_alert=True)
+        return
+    
+    template = TASK_TEMPLATES[template_key]
+    
+    await callback.message.edit_text(
+        f"✅ <b>{template['name']}</b>\n"
+        f"<i>{template['desc']}</i>\n\n"
+        f"<b>Готовая задача:</b>\n\n"
+        f"<pre>{template['text']}</pre>\n\n"
+        f"👉 Скопируй и отправь как:\n"
+        f"<code>/task ...</code>",
+        parse_mode="HTML"
+    )
+    
+    await callback.answer(f"Выбран шаблон: {template['name']}")
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
     if not is_allowed(message.from_user.id):
