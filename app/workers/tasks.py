@@ -22,6 +22,45 @@ def send_telegram_message(chat_id, text):
     with httpx.Client(timeout=30) as client:
         client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
+def search_duckduckgo(query):
+    """Поиск через DuckDuckGo — бесплатно, без ключа"""
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get("https://api.duckduckgo.com/", params={
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1
+            })
+            data = resp.json()
+            
+            results = []
+            if data.get("Abstract"):
+                results.append(data["Abstract"])
+            
+            for topic in data.get("RelatedTopics", [])[:5]:
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results.append(topic["Text"])
+            
+            if results:
+                return "\n".join([f"• {r}" for r in results[:5]])
+            
+            # Fallback — используем DuckDuckGo HTML
+            resp2 = client.get("https://html.duckduckgo.com/html/", params={"q": query}, headers={
+                "User-Agent": "Mozilla/5.0"
+            })
+            
+            import re
+            snippets = re.findall(r'class="result__snippet">(.*?)</a>', resp2.text)
+            if snippets:
+                clean = [re.sub(r'<.*?>', '', s).strip() for s in snippets[:5]]
+                return "\n".join([f"• {s}" for s in clean if s])
+            
+            return f"Нет результатов по запросу: {query}"
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        return f"Ошибка поиска: {str(e)[:100]}"
+
 def get_provider(model_id):
     for key, model in FREE_MODELS.items():
         if model["id"] == model_id:
@@ -110,20 +149,37 @@ def call_llm(system_prompt, messages, task_description, model):
         return call_huggingface(system_prompt, messages, task_description, model)
     return call_openrouter(system_prompt, messages, task_description, model)
 
+def process_search_requests(response):
+    """Ищет команды поиска в ответе агента и выполняет их"""
+    import re
+    
+    search_patterns = [
+        r'\[SEARCH:\s*(.+?)\]',
+        r'\[ПОИСК:\s*(.+?)\]',
+        r'SEARCH:\s*"(.+?)"',
+        r'ПОИСК:\s*"(.+?)"',
+    ]
+    
+    search_results = []
+    for pattern in search_patterns:
+        matches = re.findall(pattern, response)
+        for query in matches:
+            result = search_duckduckgo(query.strip())
+            search_results.append(f"\n🔎 <b>Поиск: {query.strip()}</b>\n{result}")
+    
+    return search_results
+
 def get_next_agent(messages, current_step, team_agents):
-    """Определяет следующего агента из команды"""
     if not messages:
         return team_agents[0] if team_agents else "coordinator"
     
     last = messages[-1].get("content", "").lower()
     
-    # Проверяем упоминания @agent
     for agent_key in AGENT_ROLES.keys():
         if f"@{agent_key}" in last:
             if agent_key in team_agents:
                 return agent_key
     
-    # Round-robin по команде
     return team_agents[current_step % len(team_agents)]
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
@@ -161,7 +217,6 @@ def run_discussion_step(self, task_id):
         cur.execute("SELECT role, content FROM messages WHERE task_id = %s ORDER BY created_at", (task_id,))
         messages = [{"role": m["role"], "content": m["content"]} for m in cur.fetchall()]
         
-        # Получаем команду агентов для этого чата
         cur.execute("SELECT team FROM chat_settings WHERE chat_id = %s", (task["chat_id"],))
         chat_settings = cur.fetchone()
         
@@ -181,9 +236,12 @@ def run_discussion_step(self, task_id):
         
         llm_messages = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in messages[-10:]]
         
-        # Добавляем информацию о команде в промпт
         team_info = ", ".join([f"@{a}" for a in team_agents])
         full_prompt = f"{agent['prompt']}\n\nТвоя команда: {team_info}"
+        
+        # Добавляем инструкцию поиска для исследователя
+        if agent_key == "researcher":
+            full_prompt += "\n\nДля поиска в интернете пиши: [SEARCH: запрос]\nПример: [SEARCH: AI trends 2025]"
         
         task_model = task.get("model") or settings.DEFAULT_MODEL
         response = call_llm(full_prompt, llm_messages, task["description"], task_model)
@@ -205,7 +263,18 @@ def run_discussion_step(self, task_id):
             send_telegram_message(task["chat_id"], f"⚠️ Ошибка: {response}. /model")
             return {"status": "error"}
         
+        # Обрабатываем поисковые запросы
+        search_results = process_search_requests(response)
+        
         content = f"{agent['emoji']} <b>{agent['name']}:</b>\n{response}"
+        
+        # Добавляем результаты поиска
+        if search_results:
+            search_text = "\n".join(search_results)
+            content += f"\n{search_text}"
+            
+            # Сохраняем результаты поиска как сообщение
+            cur.execute("INSERT INTO messages (task_id, role, content) VALUES (%s, %s, %s)", (task_id, "search", search_text))
         
         cur.execute("INSERT INTO messages (task_id, role, content) VALUES (%s, %s, %s)", (task_id, agent_key, content))
         cur.execute("UPDATE tasks SET current_step = %s, status = 'IN_PROGRESS' WHERE id = %s", (task["current_step"] + 1, task_id))
