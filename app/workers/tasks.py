@@ -1,5 +1,5 @@
 from celery import Celery
-from app.config import settings
+from app.config import settings, FREE_MODELS
 import logging
 import httpx
 
@@ -22,14 +22,20 @@ def send_telegram_message(chat_id, text):
     with httpx.Client(timeout=30) as client:
         client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
-def call_openrouter(system_prompt, messages, task_description, model=None):
+def get_provider(model_id):
+    """Определяет провайдера по model_id"""
+    for key, model in FREE_MODELS.items():
+        if model["id"] == model_id:
+            return model.get("provider", "openrouter")
+    return "openrouter"
+
+def call_openrouter(system_prompt, messages, task_description, model):
     url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
     full_messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"ЗАДАЧА: {task_description}"},
         *messages
     ]
-    use_model = model or settings.DEFAULT_MODEL
     
     try:
         with httpx.Client(timeout=60) as client:
@@ -37,7 +43,7 @@ def call_openrouter(system_prompt, messages, task_description, model=None):
                 "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
             }, json={
-                "model": use_model,
+                "model": model,
                 "messages": full_messages,
                 "max_tokens": 1024,
                 "temperature": 0.7,
@@ -46,7 +52,7 @@ def call_openrouter(system_prompt, messages, task_description, model=None):
             if resp.status_code == 429:
                 return "RATE_LIMIT"
             if resp.status_code != 200:
-                logger.error(f"API error: {resp.status_code} - {resp.text}")
+                logger.error(f"OpenRouter error: {resp.status_code} - {resp.text}")
                 return "API_ERROR"
             
             data = resp.json()
@@ -56,8 +62,58 @@ def call_openrouter(system_prompt, messages, task_description, model=None):
             content = data["choices"][0].get("message", {}).get("content")
             return content if content else "NO_CONTENT"
     except Exception as e:
-        logger.error(f"Exception: {e}")
+        logger.error(f"OpenRouter exception: {e}")
         return "EXCEPTION"
+
+def call_huggingface(system_prompt, messages, task_description, model):
+    """Вызов Hugging Face Inference API"""
+    url = f"https://api-inference.huggingface.co/models/{model}/v1/chat/completions"
+    
+    full_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"ЗАДАЧА: {task_description}"},
+        *messages
+    ]
+    
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(url, headers={
+                "Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "messages": full_messages,
+                "max_tokens": 1024,
+                "temperature": 0.7,
+            })
+            
+            if resp.status_code == 429:
+                return "RATE_LIMIT"
+            if resp.status_code == 503:
+                return "MODEL_LOADING"
+            if resp.status_code != 200:
+                logger.error(f"HuggingFace error: {resp.status_code} - {resp.text}")
+                return "API_ERROR"
+            
+            data = resp.json()
+            if "choices" not in data or not data["choices"]:
+                return "EMPTY_RESPONSE"
+            
+            content = data["choices"][0].get("message", {}).get("content")
+            return content if content else "NO_CONTENT"
+    except Exception as e:
+        logger.error(f"HuggingFace exception: {e}")
+        return "EXCEPTION"
+
+def call_llm(system_prompt, messages, task_description, model):
+    """Универсальный вызов LLM"""
+    provider = get_provider(model)
+    
+    if provider == "huggingface":
+        if not settings.HUGGINGFACE_API_KEY:
+            return "NO_HF_KEY"
+        return call_huggingface(system_prompt, messages, task_description, model)
+    else:
+        return call_openrouter(system_prompt, messages, task_description, model)
 
 AGENT_PROMPTS = {
     "coordinator": {"emoji": "🎯", "name": "Координатор", "prompt": "Ты — Координатор команды. Управляй обсуждением.\nНазначай: @researcher, @critic, @executor\nЕсли готово: [ФИНАЛЬНЫЙ ОТВЕТ] и текст.\nМаксимум 3 предложения."},
@@ -119,11 +175,28 @@ def run_discussion_step(self, task_id):
         llm_messages = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in messages[-10:]]
         
         task_model = task.get("model") or settings.DEFAULT_MODEL
-        response = call_openrouter(agent["prompt"], llm_messages, task["description"], task_model)
+        response = call_llm(agent["prompt"], llm_messages, task["description"], task_model)
         
-        if response in ("RATE_LIMIT", "API_ERROR", "EMPTY_RESPONSE", "NO_CONTENT", "EXCEPTION"):
+        if response == "RATE_LIMIT":
             conn.close()
-            send_telegram_message(task["chat_id"], f"⚠️ Ошибка: {response}")
+            send_telegram_message(task["chat_id"], "⏸ Rate limit. Повтор через 30 сек...")
+            run_discussion_step.apply_async(args=[task_id], countdown=30)
+            return {"status": "retry"}
+        
+        if response == "MODEL_LOADING":
+            conn.close()
+            send_telegram_message(task["chat_id"], "⏳ Модель загружается. Повтор через 20 сек...")
+            run_discussion_step.apply_async(args=[task_id], countdown=20)
+            return {"status": "retry"}
+        
+        if response == "NO_HF_KEY":
+            conn.close()
+            send_telegram_message(task["chat_id"], "⚠️ Нет API ключа HuggingFace. Выбери другую модель /model")
+            return {"status": "error"}
+        
+        if response in ("API_ERROR", "EMPTY_RESPONSE", "NO_CONTENT", "EXCEPTION"):
+            conn.close()
+            send_telegram_message(task["chat_id"], f"⚠️ Ошибка: {response}. Попробуй /model")
             return {"status": "error"}
         
         content = f"{agent['emoji']} <b>{agent['name']}:</b>\n{response}"
