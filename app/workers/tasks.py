@@ -41,24 +41,48 @@ def call_openrouter(system_prompt, messages, task):
         {"role": "user", "content": f"ЗАДАЧА: {task}"},
         *messages
     ]
-    with httpx.Client(timeout=60) as client:
-        resp = client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.DEFAULT_MODEL,
-                "messages": full_messages,
-                "max_tokens": 1024,
-                "temperature": 0.7,
-            }
-        )
-        if resp.status_code == 429:
-            return "Превышен лимит API. Подожди минуту."
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    
+    try:
+        with httpx.Client(timeout=60) as client:
+            resp = client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.DEFAULT_MODEL,
+                    "messages": full_messages,
+                    "max_tokens": 1024,
+                    "temperature": 0.7,
+                }
+            )
+            
+            if resp.status_code == 429:
+                return "⏸ Превышен лимит API. Подожди минуту."
+            
+            if resp.status_code != 200:
+                logger.error(f"OpenRouter error: {resp.status_code} - {resp.text}")
+                return f"❌ Ошибка API: {resp.status_code}"
+            
+            data = resp.json()
+            
+            # Проверяем наличие ответа
+            if "choices" not in data or len(data["choices"]) == 0:
+                logger.error(f"OpenRouter empty response: {data}")
+                return "❌ Пустой ответ от API"
+            
+            content = data["choices"][0].get("message", {}).get("content")
+            
+            if not content:
+                logger.error(f"OpenRouter no content: {data}")
+                return "❌ Нет контента в ответе"
+            
+            return content
+            
+    except Exception as e:
+        logger.error(f"OpenRouter exception: {e}")
+        return f"❌ Ошибка: {str(e)[:100]}"
 
 
 AGENT_PROMPTS = {
