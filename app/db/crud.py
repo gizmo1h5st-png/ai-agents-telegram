@@ -1,16 +1,18 @@
 from sqlalchemy import select, and_
 from app.db.session import get_session
-from app.db.models import Task, Message, TaskStatus
+from app.db.models import Task, Message, TaskStatus, ChatSettings
+from app.config import settings
 from typing import Optional, List
-from datetime import datetime
 
-async def create_task(chat_id: int, user_id: int, description: str) -> Task:
+async def create_task(chat_id: int, user_id: int, description: str, model: str = None) -> Task:
     async with get_session() as session:
         task = Task(
             chat_id=chat_id,
             user_id=user_id,
             description=description,
-            status=TaskStatus.PENDING
+            status=TaskStatus.PENDING,
+            model=model or settings.DEFAULT_MODEL,
+            max_steps=settings.MAX_STEPS_PER_TASK
         )
         session.add(task)
         await session.commit()
@@ -65,3 +67,26 @@ async def add_message(task_id: int, role: str, content: str) -> Message:
         await session.commit()
         await session.refresh(message)
         return message
+
+async def get_chat_model(chat_id: int) -> str:
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        if cs and cs.model:
+            return cs.model
+        return settings.DEFAULT_MODEL
+
+async def set_chat_model(chat_id: int, model: str):
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        if cs:
+            cs.model = model
+        else:
+            cs = ChatSettings(chat_id=chat_id, model=model)
+            session.add(cs)
+        await session.commit()
