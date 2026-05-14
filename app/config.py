@@ -38,8 +38,8 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# OpenRouter модели
 FREE_MODELS = {
+    # === OpenRouter (8 моделей) ===
     "deepseek": {"id": "deepseek/deepseek-v4-flash:free", "name": "🚀 DeepSeek V4", "desc": "Быстрая", "provider": "openrouter"},
     "nemotron": {"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "name": "🟢 Nemotron 30B", "desc": "NVIDIA", "provider": "openrouter"},
     "trinity": {"id": "arcee-ai/trinity-large-thinking:free", "name": "🔺 Trinity", "desc": "Thinking", "provider": "openrouter"},
@@ -48,9 +48,8 @@ FREE_MODELS = {
     "gpt-120b": {"id": "openai/gpt-oss-120b:free", "name": "🤖 GPT-OSS 120B", "desc": "Большая", "provider": "openrouter"},
     "gpt-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная", "provider": "openrouter"},
     "lfm": {"id": "liquid/lfm-2.5-1.2b-instruct:free", "name": "💧 LFM", "desc": "Liquid AI", "provider": "openrouter"},
-    # Hugging Face модели
+    # === HuggingFace (3 модели) ===
     "hf-deepseek": {"id": "deepseek-ai/DeepSeek-R1", "name": "🧠 HF DeepSeek R1", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1 8B", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1", "desc": "HuggingFace", "provider": "huggingface"},
     "hf-qwen": {"id": "Qwen/Qwen2.5-72B-Instruct", "name": "🌟 HF Qwen 72B", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-mistral": {"id": "mistralai/Mistral-Small-24B-Instruct-2501", "name": "🌀 HF Mistral 24B", "desc": "HuggingFace", "provider": "huggingface"},
 }
