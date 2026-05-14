@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from contextlib import asynccontextmanager
 from app.config import settings
@@ -26,10 +27,15 @@ async def init_db():
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            
+            # Добавляем колонку model если её нет
+            await conn.execute(text("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model VARCHAR(200)
+            """))
+            
         logger.info("Database initialized successfully!")
     except Exception as e:
         logger.error(f"Database connection failed: {e}")
-        logger.error("Make sure DATABASE_URL is set and PostgreSQL is connected in Railway!")
         raise
 
 @asynccontextmanager
