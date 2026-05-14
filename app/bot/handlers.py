@@ -28,6 +28,7 @@ async def start_handler(message: Message):
         "🎯 <b>Команды:</b>\n"
         "• /task <i>описание</i> — задача для команды\n"
         "• /image <i>описание</i> — генерация картинки\n"
+        "• /search <i>запрос</i> — поиск в интернете\n"
         "• /team — выбрать команду агентов\n"
         "• /roles — все доступные роли\n"
         "• /model — выбрать модель ИИ\n"
@@ -161,7 +162,43 @@ async def agent_toggle_callback(callback: CallbackQuery):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
-
+@router.message(Command("search", "find"))
+async def search_handler(message: Message):
+    query = message.text.split(maxsplit=1)
+    if len(query) < 2:
+        await message.answer("🔍 <code>/search запрос</code>", parse_mode="HTML")
+        return
+    
+    query_text = query[1].strip()
+    status_msg = await message.answer(f"🔍 Ищу: <i>{query_text}</i>...", parse_mode="HTML")
+    
+    try:
+        import httpx
+        with httpx.Client(timeout=10) as client:
+            resp = client.get("https://api.duckduckgo.com/", params={
+                "q": query_text,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1
+            })
+            data = resp.json()
+            
+            results = []
+            if data.get("Abstract"):
+                results.append(data["Abstract"])
+            for topic in data.get("RelatedTopics", [])[:5]:
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results.append(topic["Text"])
+            
+            if results:
+                text = f"🔍 <b>Результаты: {query_text}</b>\n\n"
+                for i, r in enumerate(results[:5], 1):
+                    text += f"{i}. {r}\n\n"
+                await status_msg.edit_text(text, parse_mode="HTML")
+            else:
+                await status_msg.edit_text(f"🔍 Нет результатов по: <i>{query_text}</i>", parse_mode="HTML")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
     if not is_allowed(message.from_user.id):
