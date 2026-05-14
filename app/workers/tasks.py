@@ -23,40 +23,20 @@ def send_telegram_message(chat_id, text):
         client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 def search_duckduckgo(query):
-    """Поиск через DuckDuckGo — бесплатно, без ключа"""
+    """Поиск через ddgs — надёжный, без ключа"""
     try:
-        with httpx.Client(timeout=10) as client:
-            resp = client.get("https://api.duckduckgo.com/", params={
-                "q": query,
-                "format": "json",
-                "no_html": 1,
-                "skip_disambig": 1
-            })
-            data = resp.json()
-            
-            results = []
-            if data.get("Abstract"):
-                results.append(data["Abstract"])
-            
-            for topic in data.get("RelatedTopics", [])[:5]:
-                if isinstance(topic, dict) and topic.get("Text"):
-                    results.append(topic["Text"])
-            
-            if results:
-                return "\n".join([f"• {r}" for r in results[:5]])
-            
-            # Fallback — используем DuckDuckGo HTML
-            resp2 = client.get("https://html.duckduckgo.com/html/", params={"q": query}, headers={
-                "User-Agent": "Mozilla/5.0"
-            })
-            
-            import re
-            snippets = re.findall(r'class="result__snippet">(.*?)</a>', resp2.text)
-            if snippets:
-                clean = [re.sub(r'<.*?>', '', s).strip() for s in snippets[:5]]
-                return "\n".join([f"• {s}" for s in clean if s])
-            
-            return f"Нет результатов по запросу: {query}"
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=5):
+                title = r.get("title", "")
+                body = r.get("body", "")
+                link = r.get("href", "")
+                results.append(f"<b>{title}</b>\n{body}\n{link}")
+        
+        if results:
+            return "\n\n".join(results[:5])
+        return f"Нет результатов: {query}"
     except Exception as e:
         logger.error(f"Search error: {e}")
         return f"Ошибка поиска: {str(e)[:100]}"
