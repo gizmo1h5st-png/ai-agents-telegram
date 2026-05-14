@@ -8,6 +8,7 @@ httpx==0.26.0
 sqlalchemy[asyncio]==2.0.25
 asyncpg==0.29.0
 alembic==1.13.1
+psycopg2-binary==2.9.9
 
 # Task Queue
 celery[redis]==5.3.6
@@ -19,5 +20,3 @@ python-dotenv==1.0.0
 
 # Production
 gunicorn==21.2.0
-
-psycopg2-binary==2.9.9
