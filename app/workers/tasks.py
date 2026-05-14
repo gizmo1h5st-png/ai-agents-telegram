@@ -5,12 +5,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-celery_app = Celery(
-    "ai_agents",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
-)
-
+celery_app = Celery("ai_agents", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
@@ -22,199 +17,136 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
 )
 
-
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     with httpx.Client(timeout=30) as client:
-        resp = client.post(url, json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
-        })
-        return resp.json()
+        client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
-
-def call_openrouter(system_prompt, messages, task):
+def call_openrouter(system_prompt, messages, task_description, model=None):
     url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
     full_messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"ЗАДАЧА: {task}"},
+        {"role": "user", "content": f"ЗАДАЧА: {task_description}"},
         *messages
     ]
+    use_model = model or settings.DEFAULT_MODEL
     
     try:
         with httpx.Client(timeout=60) as client:
-            resp = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": settings.DEFAULT_MODEL,
-                    "messages": full_messages,
-                    "max_tokens": 1024,
-                    "temperature": 0.7,
-                }
-            )
+            resp = client.post(url, headers={
+                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            }, json={
+                "model": use_model,
+                "messages": full_messages,
+                "max_tokens": 1024,
+                "temperature": 0.7,
+            })
             
             if resp.status_code == 429:
                 return "RATE_LIMIT"
-            
             if resp.status_code != 200:
-                logger.error(f"OpenRouter error: {resp.status_code} - {resp.text}")
+                logger.error(f"API error: {resp.status_code} - {resp.text}")
                 return "API_ERROR"
             
             data = resp.json()
-            
-            if "choices" not in data or len(data["choices"]) == 0:
-                logger.error(f"OpenRouter empty response: {data}")
+            if "choices" not in data or not data["choices"]:
                 return "EMPTY_RESPONSE"
             
             content = data["choices"][0].get("message", {}).get("content")
-            
-            if not content:
-                logger.error(f"OpenRouter no content: {data}")
-                return "NO_CONTENT"
-            
-            return content
-            
+            return content if content else "NO_CONTENT"
     except Exception as e:
-        logger.error(f"OpenRouter exception: {e}")
+        logger.error(f"Exception: {e}")
         return "EXCEPTION"
 
-
 AGENT_PROMPTS = {
-    "coordinator": {
-        "emoji": "🎯",
-        "name": "Координатор",
-        "prompt": "Ты — Координатор команды. Управляй обсуждением.\nНазначай агентов: @researcher, @critic, @executor\nЕсли готово: пиши [ФИНАЛЬНЫЙ ОТВЕТ] и текст.\nМаксимум 3 предложения."
-    },
-    "researcher": {
-        "emoji": "🔍",
-        "name": "Исследователь",
-        "prompt": "Ты — Исследователь. Предоставляй информацию.\nКратко излагай (2-4 пункта). Передай слово @critic или @coordinator.\nНе выдумывай факты."
-    },
-    "critic": {
-        "emoji": "🧐",
-        "name": "Критик",
-        "prompt": "Ты — Критик. Проверяй решения.\nОценка: Хорошо / Замечания / Проблема\nЕсли всё ок — передай @coordinator. Максимум 3 предложения."
-    },
-    "executor": {
-        "emoji": "⚡",
-        "name": "Исполнитель",
-        "prompt": "Ты — Исполнитель. Делай конкретную работу.\nДавай готовый результат. После: @critic или @coordinator."
-    },
+    "coordinator": {"emoji": "🎯", "name": "Координатор", "prompt": "Ты — Координатор команды. Управляй обсуждением.\nНазначай: @researcher, @critic, @executor\nЕсли готово: [ФИНАЛЬНЫЙ ОТВЕТ] и текст.\nМаксимум 3 предложения."},
+    "researcher": {"emoji": "🔍", "name": "Исследователь", "prompt": "Ты — Исследователь. Предоставляй информацию.\n2-4 пункта. Передай @critic или @coordinator."},
+    "critic": {"emoji": "🧐", "name": "Критик", "prompt": "Ты — Критик. Проверяй решения.\nХорошо / Замечания / Проблема\nЕсли ок — @coordinator."},
+    "executor": {"emoji": "⚡", "name": "Исполнитель", "prompt": "Ты — Исполнитель. Делай работу.\nДавай результат. После: @critic или @coordinator."},
 }
-
 
 def get_next_agent(messages, current_step):
     if not messages:
         return "coordinator"
-    last_content = messages[-1].get("content", "").lower()
-    if "@researcher" in last_content:
-        return "researcher"
-    if "@critic" in last_content:
-        return "critic"
-    if "@executor" in last_content:
-        return "executor"
-    if "@coordinator" in last_content:
-        return "coordinator"
-    agents = ["coordinator", "researcher", "critic", "executor"]
-    return agents[current_step % len(agents)]
-
+    last = messages[-1].get("content", "").lower()
+    if "@researcher" in last: return "researcher"
+    if "@critic" in last: return "critic"
+    if "@executor" in last: return "executor"
+    if "@coordinator" in last: return "coordinator"
+    return ["coordinator", "researcher", "critic", "executor"][current_step % 4]
 
 @celery_app.task(bind=True, max_retries=2, default_retry_delay=30)
 def run_discussion_step(self, task_id):
     import psycopg2
     from psycopg2.extras import RealDictCursor
-
+    
     db_url = settings.DATABASE_URL
     if db_url.startswith("postgresql+asyncpg://"):
         db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
-
+    
     conn = None
     try:
         conn = psycopg2.connect(db_url)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
+        
         cur.execute("SELECT * FROM tasks WHERE id = %s", (task_id,))
         task = cur.fetchone()
-
         if not task:
             conn.close()
-            return {"status": "error", "reason": "Task not found"}
-
+            return {"status": "error"}
+        
         status = str(task["status"]).upper().replace("TASKSTATUS.", "")
         if status not in ("PENDING", "IN_PROGRESS"):
             conn.close()
-            return {"status": "skipped", "reason": f"Task status: {status}"}
-
+            return {"status": "skipped"}
+        
         if task["current_step"] >= task["max_steps"]:
-            cur.execute(
-                "UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s",
-                ("Достигнут лимит шагов.", task_id)
-            )
+            cur.execute("UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s", ("Лимит шагов.", task_id))
             conn.commit()
             conn.close()
-            send_telegram_message(task["chat_id"], "✅ <b>ЗАДАЧА ВЫПОЛНЕНА</b>\n\nДостигнут лимит шагов.")
+            send_telegram_message(task["chat_id"], "✅ <b>ЗАВЕРШЕНО</b>\n\nЛимит шагов.")
             return {"status": "completed"}
-
-        cur.execute(
-            "SELECT role, content FROM messages WHERE task_id = %s ORDER BY created_at",
-            (task_id,)
-        )
+        
+        cur.execute("SELECT role, content FROM messages WHERE task_id = %s ORDER BY created_at", (task_id,))
         messages = [{"role": m["role"], "content": m["content"]} for m in cur.fetchall()]
-
+        
         agent_key = get_next_agent(messages, task["current_step"])
         agent = AGENT_PROMPTS[agent_key]
-
+        
         logger.info(f"Task {task_id}, step {task['current_step'] + 1}, agent: {agent['name']}")
-
-        llm_messages = []
-        for m in messages[-10:]:
-            role = "assistant" if m["role"] != "user" else "user"
-            llm_messages.append({"role": role, "content": m["content"]})
-
-        response = call_openrouter(agent["prompt"], llm_messages, task["description"])
-
+        
+        llm_messages = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in messages[-10:]]
+        
+        task_model = task.get("model") or settings.DEFAULT_MODEL
+        response = call_openrouter(agent["prompt"], llm_messages, task["description"], task_model)
+        
         if response in ("RATE_LIMIT", "API_ERROR", "EMPTY_RESPONSE", "NO_CONTENT", "EXCEPTION"):
             conn.close()
-            send_telegram_message(task["chat_id"], f"⚠️ Ошибка API: {response}. Попробуй позже.")
-            return {"status": "error", "reason": response}
-
+            send_telegram_message(task["chat_id"], f"⚠️ Ошибка: {response}")
+            return {"status": "error"}
+        
         content = f"{agent['emoji']} <b>{agent['name']}:</b>\n{response}"
-
-        cur.execute(
-            "INSERT INTO messages (task_id, role, content) VALUES (%s, %s, %s)",
-            (task_id, agent_key, content)
-        )
-        cur.execute(
-            "UPDATE tasks SET current_step = %s, status = 'IN_PROGRESS' WHERE id = %s",
-            (task["current_step"] + 1, task_id)
-        )
+        
+        cur.execute("INSERT INTO messages (task_id, role, content) VALUES (%s, %s, %s)", (task_id, agent_key, content))
+        cur.execute("UPDATE tasks SET current_step = %s, status = 'IN_PROGRESS' WHERE id = %s", (task["current_step"] + 1, task_id))
         conn.commit()
-
+        
         send_telegram_message(task["chat_id"], content)
-
-        is_final = "[ФИНАЛЬНЫЙ ОТВЕТ]" in response or "[FINAL]" in response
-
-        if is_final:
-            cur.execute(
-                "UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s",
-                (response, task_id)
-            )
+        
+        if "[ФИНАЛЬНЫЙ ОТВЕТ]" in response or "[FINAL]" in response:
+            cur.execute("UPDATE tasks SET status = 'COMPLETED', final_answer = %s WHERE id = %s", (response, task_id))
             conn.commit()
             conn.close()
-            send_telegram_message(task["chat_id"], "✅ <b>ЗАДАЧА ВЫПОЛНЕНА</b>")
+            send_telegram_message(task["chat_id"], "✅ <b>ЗАВЕРШЕНО</b>")
             return {"status": "completed"}
-
+        
         conn.close()
         run_discussion_step.apply_async(args=[task_id], countdown=3)
-        return {"status": "continue", "step": task["current_step"] + 1}
-
+        return {"status": "continue"}
+        
     except Exception as e:
-        logger.error(f"Error in step: {e}")
+        logger.error(f"Error: {e}")
         if conn:
             conn.close()
         raise self.retry(exc=e)
