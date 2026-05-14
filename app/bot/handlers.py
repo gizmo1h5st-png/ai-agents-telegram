@@ -1,11 +1,13 @@
-from aiogram import Router, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram import Router, F, Bot
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, URLInputFile
 from aiogram.filters import Command, CommandStart
 from app.config import settings, FREE_MODELS
 from app.db.crud import create_task, get_active_task, update_task_status, get_chat_model, set_chat_model
 from app.db.models import TaskStatus
 from app.workers.tasks import run_discussion_step
 import logging
+import httpx
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -23,6 +25,7 @@ async def start_handler(message: Message):
         "👋 <b>Привет! Я — координатор команды ИИ-агентов.</b>\n\n"
         "🎯 <b>Команды:</b>\n"
         "• /task <i>описание</i> — поставить задачу\n"
+        "• /image <i>описание</i> — сгенерировать картинку\n"
         "• /model — выбрать модель ИИ\n"
         "• /models — список всех моделей\n"
         "• /status — статус задачи\n"
@@ -30,6 +33,52 @@ async def start_handler(message: Message):
         f"🤖 Модель: <code>{model_name}</code>",
         parse_mode="HTML"
     )
+
+@router.message(Command("image", "img", "picture", "pic"))
+async def image_handler(message: Message):
+    if not is_allowed(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+    
+    # Извлекаем промпт
+    prompt = message.text.split(maxsplit=1)
+    if len(prompt) < 2:
+        await message.answer(
+            "🖼️ <b>Генерация изображений</b>\n\n"
+            "Использование:\n"
+            "<code>/image красивый закат над океаном</code>\n"
+            "<code>/img робот в стиле киберпанк</code>\n\n"
+            "💡 Добавь детали для лучшего результата!",
+            parse_mode="HTML"
+        )
+        return
+    
+    prompt_text = prompt[1].strip()
+    
+    # Отправляем статус
+    status_msg = await message.answer("🎨 Генерирую изображение...")
+    
+    try:
+        # Pollinations.ai - бесплатно, без API ключа
+        encoded_prompt = urllib.parse.quote(prompt_text)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        
+        # Отправляем изображение
+        photo = URLInputFile(image_url, filename="generated.png")
+        await message.answer_photo(
+            photo=photo,
+            caption=f"🖼️ <b>{prompt_text}</b>\n\n<i>Сгенерировано с Pollinations.ai</i>",
+            parse_mode="HTML"
+        )
+        
+        # Удаляем статус
+        await status_msg.delete()
+        
+        logger.info(f"Image generated: {prompt_text[:50]}")
+        
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await status_msg.edit_text(f"❌ Ошибка генерации: {str(e)[:100]}")
 
 @router.message(Command("model"))
 async def model_handler(message: Message):
@@ -74,9 +123,26 @@ async def model_callback(callback: CallbackQuery):
 @router.message(Command("models"))
 async def models_list_handler(message: Message):
     text = "📋 <b>Бесплатные модели:</b>\n\n"
+    
+    # Группируем по провайдеру
+    openrouter = []
+    huggingface = []
     for key, model in FREE_MODELS.items():
-        text += f"{model['name']}\n<i>{model['desc']}</i>\n\n"
-    text += "Используй /model для выбора"
+        if model.get("provider") == "huggingface":
+            huggingface.append(model)
+        else:
+            openrouter.append(model)
+    
+    text += "<b>OpenRouter:</b>\n"
+    for m in openrouter:
+        text += f"• {m['name']} — {m['desc']}\n"
+    
+    if huggingface:
+        text += "\n<b>HuggingFace:</b>\n"
+        for m in huggingface:
+            text += f"• {m['name']} — {m['desc']}\n"
+    
+    text += "\nИспользуй /model для выбора"
     await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("task"))
@@ -137,6 +203,24 @@ async def stop_handler(message: Message):
     
     await update_task_status(task.id, TaskStatus.COMPLETED, "Остановлено пользователем.")
     await message.answer(f"🛑 Задача #{task.id} остановлена.")
+
+@router.message(Command("help"))
+async def help_handler(message: Message):
+    await message.answer(
+        "📚 <b>Справка</b>\n\n"
+        "<b>Основные команды:</b>\n"
+        "• /task <i>текст</i> — поставить задачу команде агентов\n"
+        "• /image <i>текст</i> — сгенерировать изображение\n"
+        "• /model — выбрать модель ИИ\n"
+        "• /status — статус текущей задачи\n"
+        "• /stop — остановить задачу\n\n"
+        "<b>Агенты:</b>\n"
+        "🎯 Координатор — управляет обсуждением\n"
+        "🔍 Исследователь — собирает информацию\n"
+        "🧐 Критик — проверяет решения\n"
+        "⚡ Исполнитель — выполняет задачи",
+        parse_mode="HTML"
+    )
 
 @router.message(F.text)
 async def echo_handler(message: Message):
