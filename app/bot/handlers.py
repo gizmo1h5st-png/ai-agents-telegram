@@ -194,7 +194,25 @@ async def search_handler(message: Message):
         logger.error(f"Search error: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
-        
+        @router.message(Command("templates"))
+async def templates_handler(message: Message):
+    buttons = []
+    for key, template in TASK_TEMPLATES.items():
+        buttons.append([
+            InlineKeyboardButton(
+                text=template["name"],
+                callback_data=f"template:{key}"
+            )
+        ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    await message.answer(
+        "📚 <b>Шаблоны задач</b>\n\n"
+        "Выбери готовый шаблон и бот пришлёт заготовку задачи, которую можно сразу использовать.",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
     if not is_allowed(message.from_user.id):
