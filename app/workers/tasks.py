@@ -67,13 +67,14 @@ def call_openrouter(system_prompt, messages, task_description, model):
 
 def call_huggingface(system_prompt, messages, task_description, model):
     """Вызов Hugging Face Inference API"""
-    url = f"https://api-inference.huggingface.co/models/{model}/v1/chat/completions"
+    # Формируем промпт как текст
+    prompt = f"System: {system_prompt}\n\nTask: {task_description}\n\n"
+    for m in messages[-5:]:
+        role = "Assistant" if m["role"] != "user" else "User"
+        prompt += f"{role}: {m['content']}\n\n"
+    prompt += "Assistant:"
     
-    full_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"ЗАДАЧА: {task_description}"},
-        *messages
-    ]
+    url = f"https://api-inference.huggingface.co/models/{model}"
     
     try:
         with httpx.Client(timeout=60) as client:
@@ -81,9 +82,12 @@ def call_huggingface(system_prompt, messages, task_description, model):
                 "Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}",
                 "Content-Type": "application/json",
             }, json={
-                "messages": full_messages,
-                "max_tokens": 1024,
-                "temperature": 0.7,
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 512,
+                    "temperature": 0.7,
+                    "return_full_text": False
+                }
             })
             
             if resp.status_code == 429:
@@ -91,15 +95,20 @@ def call_huggingface(system_prompt, messages, task_description, model):
             if resp.status_code == 503:
                 return "MODEL_LOADING"
             if resp.status_code != 200:
-                logger.error(f"HuggingFace error: {resp.status_code} - {resp.text}")
+                logger.error(f"HuggingFace error: {resp.status_code} - {resp.text[:200]}")
                 return "API_ERROR"
             
             data = resp.json()
-            if "choices" not in data or not data["choices"]:
+            
+            # Ответ может быть списком или объектом
+            if isinstance(data, list) and len(data) > 0:
+                content = data[0].get("generated_text", "")
+            elif isinstance(data, dict):
+                content = data.get("generated_text", "")
+            else:
                 return "EMPTY_RESPONSE"
             
-            content = data["choices"][0].get("message", {}).get("content")
-            return content if content else "NO_CONTENT"
+            return content.strip() if content else "NO_CONTENT"
     except Exception as e:
         logger.error(f"HuggingFace exception: {e}")
         return "EXCEPTION"
