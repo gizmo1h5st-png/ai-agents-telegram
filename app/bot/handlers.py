@@ -1,7 +1,7 @@
 from aiogram import Router, F
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, URLInputFile
 from aiogram.filters import Command, CommandStart
-from app.config import settings, FREE_MODELS, AGENT_ROLES, TEAM_TEMPLATES
+from app.config import settings, FREE_MODELS, AGENT_ROLES, TEAM_TEMPLATES, TASK_TEMPLATES
 from app.db.crud import create_task, get_active_task, update_task_status, get_chat_model, set_chat_model, get_chat_team, set_chat_team
 from app.db.models import TaskStatus
 from app.workers.tasks import run_discussion_step
