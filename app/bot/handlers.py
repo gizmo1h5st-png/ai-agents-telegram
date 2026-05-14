@@ -162,6 +162,7 @@ async def agent_toggle_callback(callback: CallbackQuery):
         reply_markup=keyboard,
         parse_mode="HTML"
     )
+    
 @router.message(Command("search", "find"))
 async def search_handler(message: Message):
     query = message.text.split(maxsplit=1)
@@ -189,7 +190,8 @@ async def search_handler(message: Message):
         else:
             await status_msg.edit_text(f"🔍 Нет результатов: <i>{query_text}</i>", parse_mode="HTML")
     except Exception as e:
-        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        logger.error(f"Search error: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
         
 @router.message(Command("image", "img"))
