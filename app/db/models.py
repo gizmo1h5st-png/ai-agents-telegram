@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, BigInteger
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 import enum
@@ -22,12 +22,13 @@ class Task(Base):
     __tablename__ = "tasks"
     
     id = Column(Integer, primary_key=True)
-    chat_id = Column(Integer, nullable=False, index=True)
-    user_id = Column(Integer, nullable=False)
+    chat_id = Column(BigInteger, nullable=False, index=True)
+    user_id = Column(BigInteger, nullable=False)
     description = Column(Text, nullable=False)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
     current_step = Column(Integer, default=0)
-    max_steps = Column(Integer, default=10)
+    max_steps = Column(Integer, default=25)
+    model = Column(String(200), nullable=True)
     context_summary = Column(Text, nullable=True)
     final_answer = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
@@ -45,3 +46,12 @@ class Message(Base):
     created_at = Column(DateTime, default=func.now())
     
     task = relationship("Task", back_populates="messages")
+
+class ChatSettings(Base):
+    __tablename__ = "chat_settings"
+    
+    id = Column(Integer, primary_key=True)
+    chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
+    model = Column(String(200), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
