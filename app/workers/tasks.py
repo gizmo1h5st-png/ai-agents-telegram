@@ -59,30 +59,29 @@ def call_openrouter(system_prompt, messages, task):
             )
             
             if resp.status_code == 429:
-                return "⏸ Превышен лимит API. Подожди минуту."
+                return "RATE_LIMIT"
             
             if resp.status_code != 200:
                 logger.error(f"OpenRouter error: {resp.status_code} - {resp.text}")
-                return f"❌ Ошибка API: {resp.status_code}"
+                return "API_ERROR"
             
             data = resp.json()
             
-            # Проверяем наличие ответа
             if "choices" not in data or len(data["choices"]) == 0:
                 logger.error(f"OpenRouter empty response: {data}")
-                return "❌ Пустой ответ от API"
+                return "EMPTY_RESPONSE"
             
             content = data["choices"][0].get("message", {}).get("content")
             
             if not content:
                 logger.error(f"OpenRouter no content: {data}")
-                return "❌ Нет контента в ответе"
+                return "NO_CONTENT"
             
             return content
             
     except Exception as e:
         logger.error(f"OpenRouter exception: {e}")
-        return f"❌ Ошибка: {str(e)[:100]}"
+        return "EXCEPTION"
 
 
 AGENT_PROMPTS = {
@@ -177,12 +176,11 @@ def run_discussion_step(self, task_id):
             role = "assistant" if m["role"] != "user" else "user"
             llm_messages.append({"role": role, "content": m["content"]})
 
-              response = call_openrouter(agent["prompt"], llm_messages, task["description"])
-        
-        # Если ошибка - останавливаем
-        if response.startswith("❌") or response.startswith("⏸"):
+        response = call_openrouter(agent["prompt"], llm_messages, task["description"])
+
+        if response in ("RATE_LIMIT", "API_ERROR", "EMPTY_RESPONSE", "NO_CONTENT", "EXCEPTION"):
             conn.close()
-            send_telegram_message(task["chat_id"], f"⚠️ {response}")
+            send_telegram_message(task["chat_id"], f"⚠️ Ошибка API: {response}. Попробуй позже.")
             return {"status": "error", "reason": response}
 
         content = f"{agent['emoji']} <b>{agent['name']}:</b>\n{response}"
