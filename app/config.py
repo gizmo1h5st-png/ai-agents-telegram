@@ -38,35 +38,11 @@ class Settings(BaseSettings):
 settings = Settings()
 
 FREE_MODELS = {
+    # === ПРОВЕРЕННЫЕ РАБОЧИЕ ===
     "deepseek-v4": {
         "id": "deepseek/deepseek-v4-flash:free",
         "name": "🚀 DeepSeek V4 Flash",
-        "desc": "Новейшая быстрая модель"
-    },
-    "deepseek-r1": {
-        "id": "deepseek/deepseek-r1:free",
-        "name": "🧠 DeepSeek R1",
-        "desc": "Reasoning модель"
-    },
-    "gemma-4-31b": {
-        "id": "google/gemma-4-31b-it:free",
-        "name": "💎 Gemma 4 31B",
-        "desc": "Большая от Google"
-    },
-    "gemma-4-26b": {
-        "id": "google/gemma-4-26b-a4b-it:free",
-        "name": "💎 Gemma 4 26B",
-        "desc": "Эффективная от Google"
-    },
-    "llama4": {
-        "id": "meta-llama/llama-4-maverick:free",
-        "name": "🦙 Llama 4 Maverick",
-        "desc": "Новейшая от Meta"
-    },
-    "qwen": {
-        "id": "qwen/qwen3-235b-a22b:free",
-        "name": "🌟 Qwen3 235B",
-        "desc": "Огромная от Alibaba"
+        "desc": "Быстрая и стабильная"
     },
     "nemotron": {
         "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -78,24 +54,63 @@ FREE_MODELS = {
         "name": "🔺 Trinity Thinking",
         "desc": "Глубокое мышление"
     },
-    "ring": {
-        "id": "inclusionai/ring-2.6-1t:free",
-        "name": "💍 Ring 2.6 1T",
-        "desc": "Триллионная модель"
-    },
     "laguna": {
         "id": "poolside/laguna-xs.2:free",
         "name": "🏊 Laguna XS.2",
         "desc": "От Poolside"
     },
-    "cobuddy": {
-        "id": "baidu/cobuddy:free",
-        "name": "🐼 CoBuddy",
-        "desc": "От Baidu"
-    },
     "owl": {
         "id": "openrouter/owl-alpha",
         "name": "🦉 Owl Alpha",
         "desc": "Экспериментальная"
+    },
+    
+    # === НОВЫЕ ДЛЯ ТЕСТА ===
+    "minimax": {
+        "id": "minimax/minimax-m2.5:free",
+        "name": "🔷 MiniMax M2.5",
+        "desc": "Новая модель MiniMax"
+    },
+    "lfm-thinking": {
+        "id": "liquid/lfm-2.5-1.2b-thinking:free",
+        "name": "💭 LFM Thinking",
+        "desc": "Thinking модель от Liquid"
+    },
+    "lfm-instruct": {
+        "id": "liquid/lfm-2.5-1.2b-instruct:free",
+        "name": "📝 LFM Instruct",
+        "desc": "Instruct модель от Liquid"
+    },
+    "gpt-oss-120b": {
+        "id": "openai/gpt-oss-120b:free",
+        "name": "🤖 GPT-OSS 120B",
+        "desc": "Большая open-source"
+    },
+    "gpt-oss-20b": {
+        "id": "openai/gpt-oss-20b:free",
+        "name": "🤖 GPT-OSS 20B",
+        "desc": "Компактная open-source"
+    },
+    "glm-4": {
+        "id": "zhipu-ai/glm-4.5-air:free",
+        "name": "🇨🇳 GLM-4.5 Air",
+        "desc": "От Zhipu AI"
+    },
+    "qwen-coder": {
+        "id": "qwen/qwen3-coder:free",
+        "name": "💻 Qwen3 Coder",
+        "desc": "Для кода"
+    },
+    "dolphin": {
+        "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        "name": "🐬 Dolphin Mistral 24B",
+        "desc": "Uncensored модель"
+    },
+    "hermes": {
+        "id": "nousresearch/hermes-3-llama-3.1-405b:free",
+        "name": "⚡ Hermes 3 405B",
+        "desc": "Огромная от NousResearch"
+    },
+}
     },
 }
