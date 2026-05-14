@@ -1,66 +1,116 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, BigInteger
-from sqlalchemy.orm import relationship, declarative_base
-from sqlalchemy.sql import func
-import enum
+from sqlalchemy import select, and_
+from app.db.session import get_session
+from app.db.models import Task, Message, TaskStatus, ChatSettings
+from app.config import settings
+from typing import Optional, List
 
-Base = declarative_base()
+async def create_task(chat_id: int, user_id: int, description: str, model: str = None) -> Task:
+    async with get_session() as session:
+        task = Task(
+            chat_id=chat_id,
+            user_id=user_id,
+            description=description,
+            status=TaskStatus.PENDING,
+            model=model or settings.DEFAULT_MODEL,
+            max_steps=settings.MAX_STEPS_PER_TASK
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+        return task
 
-class TaskStatus(enum.Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
+async def get_task(task_id: int) -> Optional[Task]:
+    async with get_session() as session:
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        return result.scalar_one_or_none()
 
-class AgentRole(enum.Enum):
-    COORDINATOR = "coordinator"
-    RESEARCHER = "researcher"
-    CRITIC = "critic"
-    EXECUTOR = "executor"
-    ANALYST = "analyst"
-    PROGRAMMER = "programmer"
-    COPYWRITER = "copywriter"
-    DESIGNER = "designer"
-    MARKETER = "marketer"
-    SECURITY = "security"
-    TESTER = "tester"
-    IDEATOR = "ideator"
+async def get_active_task(chat_id: int) -> Optional[Task]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(Task).where(
+                and_(
+                    Task.chat_id == chat_id,
+                    Task.status.in_([TaskStatus.PENDING, TaskStatus.IN_PROGRESS])
+                )
+            ).order_by(Task.created_at.desc())
+        )
+        return result.scalar_one_or_none()
 
-class Task(Base):
-    __tablename__ = "tasks"
-    
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(BigInteger, nullable=False, index=True)
-    user_id = Column(BigInteger, nullable=False)
-    description = Column(Text, nullable=False)
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
-    current_step = Column(Integer, default=0)
-    max_steps = Column(Integer, default=25)
-    model = Column(String(200), nullable=True)
-    context_summary = Column(Text, nullable=True)
-    final_answer = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    
-    messages = relationship("Message", back_populates="task", cascade="all, delete-orphan")
+async def update_task(task_id: int, **kwargs):
+    async with get_session() as session:
+        result = await session.execute(select(Task).where(Task.id == task_id))
+        task = result.scalar_one_or_none()
+        if task:
+            for key, value in kwargs.items():
+                setattr(task, key, value)
+            await session.commit()
+            return task
+    return None
 
-class Message(Base):
-    __tablename__ = "messages"
-    
-    id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=False)
-    role = Column(String(50), nullable=False)
-    content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=func.now())
-    
-    task = relationship("Task", back_populates="messages")
+async def update_task_status(task_id: int, status: TaskStatus, final_answer: str = None):
+    return await update_task(task_id, status=status, final_answer=final_answer)
 
-class ChatSettings(Base):
-    __tablename__ = "chat_settings"
-    
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
-    model = Column(String(200), nullable=True)
-    team = Column(String(500), nullable=True)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+async def get_messages(task_id: int, limit: int = 50) -> List[Message]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(Message)
+            .where(Message.task_id == task_id)
+            .order_by(Message.created_at)
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+async def add_message(task_id: int, role: str, content: str) -> Message:
+    async with get_session() as session:
+        message = Message(task_id=task_id, role=role, content=content)
+        session.add(message)
+        await session.commit()
+        await session.refresh(message)
+        return message
+
+async def get_chat_model(chat_id: int) -> str:
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        if cs and cs.model:
+            return cs.model
+        return settings.DEFAULT_MODEL
+
+async def set_chat_model(chat_id: int, model: str):
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        if cs:
+            cs.model = model
+        else:
+            cs = ChatSettings(chat_id=chat_id, model=model)
+            session.add(cs)
+        await session.commit()
+
+async def get_chat_team(chat_id: int) -> List[str]:
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        if cs and cs.team:
+            return cs.team.split(",")
+        return ["coordinator", "researcher", "critic", "executor"]
+
+async def set_chat_team(chat_id: int, agents: List[str]):
+    async with get_session() as session:
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        cs = result.scalar_one_or_none()
+        team_str = ",".join(agents)
+        if cs:
+            cs.team = team_str
+        else:
+            cs = ChatSettings(chat_id=chat_id, team=team_str)
+            session.add(cs)
+        await session.commit()
