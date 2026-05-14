@@ -17,6 +17,14 @@ class AgentRole(enum.Enum):
     RESEARCHER = "researcher"
     CRITIC = "critic"
     EXECUTOR = "executor"
+    ANALYST = "analyst"
+    PROGRAMMER = "programmer"
+    COPYWRITER = "copywriter"
+    DESIGNER = "designer"
+    MARKETER = "marketer"
+    SECURITY = "security"
+    TESTER = "tester"
+    IDEATOR = "ideator"
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -53,5 +61,6 @@ class ChatSettings(Base):
     id = Column(Integer, primary_key=True)
     chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
     model = Column(String(200), nullable=True)
+    team = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
