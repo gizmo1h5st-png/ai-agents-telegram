@@ -14,7 +14,12 @@ def run_worker():
     """Запуск Celery worker"""
     from app.workers.tasks import celery_app
     print("Starting CELERY WORKER...")
-    celery_app.worker_main(["worker", "-l", "info"])
+    celery_app.worker_main([
+    "worker",
+    "-l", "info",
+    "--concurrency", "2",
+    "--pool", "solo",
+])
 
 if __name__ == "__main__":
     mode = os.environ.get("APP_MODE", "bot").lower()
