@@ -49,10 +49,8 @@ FREE_MODELS = {
     "gpt-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная", "provider": "openrouter"},
     "lfm": {"id": "liquid/lfm-2.5-1.2b-instruct:free", "name": "💧 LFM", "desc": "Liquid AI", "provider": "openrouter"},
     # Hugging Face модели
-    "hf-llama": {"id": "meta-llama/Llama-3.2-3B-Instruct", "name": "🦙 Llama 3.2 3B", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-mistral": {"id": "mistralai/Mistral-7B-Instruct-v0.3", "name": "🌀 Mistral 7B", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-phi": {"id": "microsoft/Phi-3-mini-4k-instruct", "name": "🔬 Phi-3 Mini", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-qwen": {"id": "Qwen/Qwen2.5-3B-Instruct", "name": "🌟 Qwen 2.5 3B", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-gemma": {"id": "google/gemma-2-2b-it", "name": "💎 Gemma 2 2B", "desc": "HuggingFace", "provider": "huggingface"},
-    "hf-zephyr": {"id": "HuggingFaceH4/zephyr-7b-beta", "name": "🌬️ Zephyr 7B", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-deepseek": {"id": "deepseek-ai/DeepSeek-R1", "name": "🧠 HF DeepSeek R1", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1 8B", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-qwen": {"id": "Qwen/Qwen2.5-72B-Instruct", "name": "🌟 HF Qwen 72B", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-mistral": {"id": "mistralai/Mistral-Small-24B-Instruct-2501", "name": "🌀 HF Mistral 24B", "desc": "HuggingFace", "provider": "huggingface"},
 }
