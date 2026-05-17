@@ -19,8 +19,19 @@ _llm_cache = {}
 
 def send_tg(chat_id, text):
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    # Обрезаем до лимита Telegram (4096 символов)
+    if len(text) > 4000:
+        text = text[:4000] + "..."
+    
     with httpx.Client(timeout=30) as c:
-        c.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        # Сначала пробуем HTML
+        resp = c.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+        
+        # Если HTML не прошёл — отправляем без форматирования
+        if resp.status_code != 200:
+            import re
+            clean = re.sub(r'<[^>]+>', '', text)
+            c.post(url, json={"chat_id": chat_id, "text": clean})
 
 def search_web(query):
     try:
