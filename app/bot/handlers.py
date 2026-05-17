@@ -23,6 +23,8 @@ from app.db.crud import (
     set_chat_model,
     get_chat_team,
     set_chat_team,
+    get_memories,
+    clear_memories,
 )
 from app.db.models import TaskStatus
 from app.workers.tasks import run_discussion_step
@@ -35,39 +37,40 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-def is_allowed(user_id: int) -> bool:
+def allowed(uid):
     if not settings.allowed_user_ids:
         return True
-    return user_id in settings.allowed_user_ids
+    return uid in settings.allowed_user_ids
 
 
-def safe(text: str) -> str:
-    return html.escape(str(text or ""))
+def safe(t):
+    return html.escape(str(t or ""))
 
 
 @router.message(CommandStart())
 async def start_handler(message: Message):
-    current_model = await get_chat_model(message.chat.id)
-    current_team = await get_chat_team(message.chat.id)
-
-    model_name = current_model.split("/")[-1].replace(":free", "")
-    team_emojis = "".join([AGENT_ROLES.get(a, {}).get("emoji", "❓") for a in current_team])
+    m = await get_chat_model(message.chat.id)
+    t = await get_chat_team(message.chat.id)
+    mn = m.split("/")[-1].replace(":free", "")
+    te = "".join([AGENT_ROLES.get(a, {}).get("emoji", "?") for a in t])
 
     await message.answer(
-        "👋 <b>Привет! Я — координатор команды ИИ-агентов.</b>\n\n"
+        "👋 <b>AI Agents Team V2</b>\n\n"
         "🎯 <b>Команды:</b>\n"
-        "• /task <i>описание</i> — поставить задачу команде\n"
-        "• /templates — готовые шаблоны задач\n"
+        "• /task <i>описание</i> — задача для команды\n"
+        "• /templates — шаблоны задач\n"
         "• /image <i>описание</i> — генерация картинки\n"
         "• /search <i>запрос</i> — поиск в интернете\n"
         "• /team — выбрать команду агентов\n"
-        "• /roles — посмотреть роли агентов\n"
+        "• /roles — все роли агентов\n"
         "• /model — выбрать модель ИИ\n"
-        "• /models — список всех моделей\n"
-        "• /status — статус активной задачи\n"
-        "• /stop — остановить задачу\n\n"
-        f"🤖 <b>Модель:</b> <code>{safe(model_name)}</code>\n"
-        f"👥 <b>Команда:</b> {team_emojis}",
+        "• /models — список моделей\n"
+        "• /memory — память агентов\n"
+        "• /forget — очистить память\n"
+        "• /status — статус задачи\n"
+        "• /stop — остановить\n\n"
+        f"🤖 Модель: <code>{safe(mn)}</code>\n"
+        f"👥 Команда: {te}",
         parse_mode="HTML",
     )
 
@@ -79,76 +82,83 @@ async def help_handler(message: Message):
 
 @router.message(Command("roles"))
 async def roles_handler(message: Message):
-    text = "🎭 <b>Доступные роли агентов</b>\n\n"
+    text = "🎭 <b>Роли агентов</b>\n\n"
     for key, agent in AGENT_ROLES.items():
         text += (
             f"{agent['emoji']} <b>{safe(agent['name'])}</b>\n"
             f"— {safe(agent['desc'])}\n"
             f"<code>@{safe(key)}</code>\n\n"
         )
-    text += "Используй /team для выбора состава команды."
+    text += "/team — выбрать команду"
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("memory"))
+async def memory_handler(message: Message):
+    mems = await get_memories(message.chat.id)
+    if not mems:
+        await message.answer("🧠 Память пуста. Она заполняется по мере работы агентов.")
+        return
+    text = "🧠 <b>Память агентов</b>\n\n"
+    for m in mems:
+        text += f"<b>[{safe(m.category)}]</b> {safe(m.value)[:100]}\n"
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("forget"))
+async def forget_handler(message: Message):
+    if not allowed(message.from_user.id):
+        return
+    await clear_memories(message.chat.id)
+    await message.answer("🗑️ Память очищена.")
 
 
 @router.message(Command("team"))
 async def team_handler(message: Message):
-    if not is_allowed(message.from_user.id):
+    if not allowed(message.from_user.id):
         await message.answer("⛔ Нет доступа.")
         return
 
-    current_team = await get_chat_team(message.chat.id)
-    current_str = "\n".join(
+    ct = await get_chat_team(message.chat.id)
+    cs = "\n".join(
         [
-            f"{AGENT_ROLES.get(a, {}).get('emoji', '❓')} {safe(AGENT_ROLES.get(a, {}).get('name', a))}"
-            for a in current_team
+            f"{AGENT_ROLES.get(a, {}).get('emoji', '?')} {safe(AGENT_ROLES.get(a, {}).get('name', a))}"
+            for a in ct
         ]
     )
 
-    buttons = []
-    for key, template in TEAM_TEMPLATES.items():
-        emojis = "".join([AGENT_ROLES.get(a, {}).get("emoji", "") for a in template["agents"]])
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{template['name']} {emojis}",
-                    callback_data=f"team:{key}",
-                )
-            ]
+    btns = []
+    for key, tp in TEAM_TEMPLATES.items():
+        emojis = "".join([AGENT_ROLES.get(a, {}).get("emoji", "") for a in tp["agents"]])
+        btns.append(
+            [InlineKeyboardButton(text=f"{tp['name']} {emojis}", callback_data=f"team:{key}")]
         )
-
-    buttons.append(
-        [InlineKeyboardButton(text="🛠️ Собрать свою команду", callback_data="team:custom")]
-    )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    btns.append([InlineKeyboardButton(text="🛠️ Собрать свою", callback_data="team:custom")])
 
     await message.answer(
-        f"👥 <b>Выбор команды агентов</b>\n\n"
-        f"<b>Текущая команда:</b>\n{current_str}",
-        reply_markup=keyboard,
+        f"👥 <b>Команда агентов</b>\n\n<b>Сейчас:</b>\n{cs}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data.startswith("team:"))
 async def team_callback(callback: CallbackQuery):
-    if not is_allowed(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+    if not allowed(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
         return
-
     if not callback.message:
         await callback.answer()
         return
 
-    team_key = callback.data.split(":", 1)[1]
+    tk = callback.data.split(":", 1)[1]
 
-    if team_key == "custom":
-        current_team = await get_chat_team(callback.message.chat.id)
-
-        buttons = []
+    if tk == "custom":
+        ct = await get_chat_team(callback.message.chat.id)
+        btns = []
         row = []
         for key, agent in AGENT_ROLES.items():
-            mark = "✅ " if key in current_team else ""
+            mark = "✅ " if key in ct else ""
             row.append(
                 InlineKeyboardButton(
                     text=f"{mark}{agent['emoji']} {agent['name']}",
@@ -156,106 +166,94 @@ async def team_callback(callback: CallbackQuery):
                 )
             )
             if len(row) == 2:
-                buttons.append(row)
+                btns.append(row)
                 row = []
         if row:
-            buttons.append(row)
+            btns.append(row)
+        btns.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="team:save")])
 
-        buttons.append([InlineKeyboardButton(text="💾 Сохранить команду", callback_data="team:save")])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-        current_names = "\n".join(
+        cn = "\n".join(
             [
                 f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-                for a in current_team
+                for a in ct
                 if a in AGENT_ROLES
             ]
         )
-
         await callback.message.edit_text(
-            "🛠️ <b>Собери свою команду</b>\n"
-            "Нажимай на агентов, чтобы добавить или убрать.\n"
-            "<i>Минимум 2, максимум 6 агентов.</i>\n\n"
-            f"<b>Сейчас выбраны:</b>\n{current_names}",
-            reply_markup=keyboard,
+            f"🛠️ <b>Собери команду</b> (2-6 агентов)\n\n<b>Сейчас:</b>\n{cn}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
             parse_mode="HTML",
         )
         await callback.answer()
         return
 
-    if team_key == "save":
-        current_team = await get_chat_team(callback.message.chat.id)
-        current_names = "\n".join(
+    if tk == "save":
+        ct = await get_chat_team(callback.message.chat.id)
+        cn = "\n".join(
             [
                 f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-                for a in current_team
+                for a in ct
                 if a in AGENT_ROLES
             ]
         )
         await callback.message.edit_text(
-            f"✅ <b>Команда сохранена!</b>\n\n{current_names}",
+            f"✅ <b>Команда сохранена!</b>\n\n{cn}",
             parse_mode="HTML",
         )
         await callback.answer("Сохранено")
         return
 
-    if team_key not in TEAM_TEMPLATES:
-        await callback.answer("❌ Шаблон команды не найден", show_alert=True)
+    if tk not in TEAM_TEMPLATES:
+        await callback.answer("❌ Не найдено", show_alert=True)
         return
 
-    template = TEAM_TEMPLATES[team_key]
-    await set_chat_team(callback.message.chat.id, template["agents"])
-
-    team_str = "\n".join(
+    tp = TEAM_TEMPLATES[tk]
+    await set_chat_team(callback.message.chat.id, tp["agents"])
+    ts = "\n".join(
         [
             f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-            for a in template["agents"]
+            for a in tp["agents"]
             if a in AGENT_ROLES
         ]
     )
-
     await callback.message.edit_text(
-        f"✅ <b>{safe(template['name'])}</b>\n\n"
-        f"{team_str}\n\n"
-        f"<i>{safe(template['desc'])}</i>",
+        f"✅ <b>{safe(tp['name'])}</b>\n\n{ts}\n\n<i>{safe(tp['desc'])}</i>",
         parse_mode="HTML",
     )
-    await callback.answer("Команда выбрана")
+    await callback.answer("Готово")
 
 
 @router.callback_query(F.data.startswith("agent:"))
 async def agent_toggle_callback(callback: CallbackQuery):
-    if not is_allowed(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+    if not allowed(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
         return
-
     if not callback.message:
         await callback.answer()
         return
 
-    agent_key = callback.data.split(":", 1)[1]
-    current_team = await get_chat_team(callback.message.chat.id)
+    ak = callback.data.split(":", 1)[1]
+    ct = await get_chat_team(callback.message.chat.id)
 
-    if agent_key in current_team:
-        if len(current_team) <= 2:
+    if ak in ct:
+        if len(ct) <= 2:
             await callback.answer("Минимум 2 агента", show_alert=True)
             return
-        current_team.remove(agent_key)
-        await callback.answer(f"➖ {AGENT_ROLES[agent_key]['name']}")
+        ct.remove(ak)
+        await callback.answer(f"➖ {AGENT_ROLES[ak]['name']}")
     else:
-        if len(current_team) >= 6:
+        if len(ct) >= 6:
             await callback.answer("Максимум 6 агентов", show_alert=True)
             return
-        current_team.append(agent_key)
-        await callback.answer(f"➕ {AGENT_ROLES[agent_key]['name']}")
+        ct.append(ak)
+        await callback.answer(f"➕ {AGENT_ROLES[ak]['name']}")
 
-    await set_chat_team(callback.message.chat.id, current_team)
+    await set_chat_team(callback.message.chat.id, ct)
 
-    buttons = []
+    btns = []
     row = []
     for key, agent in AGENT_ROLES.items():
-        mark = "✅ " if key in current_team else ""
+        mark = "✅ " if key in ct else ""
         row.append(
             InlineKeyboardButton(
                 text=f"{mark}{agent['emoji']} {agent['name']}",
@@ -263,51 +261,36 @@ async def agent_toggle_callback(callback: CallbackQuery):
             )
         )
         if len(row) == 2:
-            buttons.append(row)
+            btns.append(row)
             row = []
     if row:
-        buttons.append(row)
+        btns.append(row)
+    btns.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="team:save")])
 
-    buttons.append([InlineKeyboardButton(text="💾 Сохранить команду", callback_data="team:save")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    current_names = "\n".join(
+    cn = "\n".join(
         [
             f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-            for a in current_team
+            for a in ct
             if a in AGENT_ROLES
         ]
     )
-
     await callback.message.edit_text(
-        "🛠️ <b>Собери свою команду</b>\n"
-        "Нажимай на агентов, чтобы добавить или убрать.\n"
-        "<i>Минимум 2, максимум 6 агентов.</i>\n\n"
-        f"<b>Сейчас выбраны:</b>\n{current_names}",
-        reply_markup=keyboard,
+        f"🛠️ <b>Собери команду</b> (2-6 агентов)\n\n<b>Сейчас:</b>\n{cn}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
         parse_mode="HTML",
     )
 
 
 @router.message(Command("templates"))
 async def templates_handler(message: Message):
-    buttons = []
-    for key, template in TASK_TEMPLATES.items():
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=template["name"],
-                    callback_data=f"template:{key}",
-                )
-            ]
+    btns = []
+    for key, tp in TASK_TEMPLATES.items():
+        btns.append(
+            [InlineKeyboardButton(text=tp["name"], callback_data=f"template:{key}")]
         )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-
     await message.answer(
-        "📚 <b>Шаблоны задач</b>\n\n"
-        "Выбери шаблон — бот пришлёт готовую заготовку задачи.",
-        reply_markup=keyboard,
+        "📚 <b>Шаблоны задач</b>\n\nВыбери шаблон:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
         parse_mode="HTML",
     )
 
@@ -318,25 +301,22 @@ async def template_callback(callback: CallbackQuery):
         await callback.answer()
         return
 
-    template_key = callback.data.split(":", 1)[1]
-
-    if template_key not in TASK_TEMPLATES:
-        await callback.answer("❌ Шаблон не найден", show_alert=True)
+    tk = callback.data.split(":", 1)[1]
+    if tk not in TASK_TEMPLATES:
+        await callback.answer("❌ Не найден", show_alert=True)
         return
 
-    template = TASK_TEMPLATES[template_key]
-    template_text = safe(template["text"])
-
+    tp = TASK_TEMPLATES[tk]
     await callback.message.edit_text(
-        f"✅ <b>{safe(template['name'])}</b>\n"
-        f"<i>{safe(template['desc'])}</i>\n\n"
+        f"✅ <b>{safe(tp['name'])}</b>\n"
+        f"<i>{safe(tp['desc'])}</i>\n\n"
         f"<b>Готовая задача:</b>\n\n"
-        f"<pre>{template_text}</pre>\n\n"
-        f"👉 Скопируй текст и отправь как:\n"
-        f"<code>/task ...</code>",
+        f"<pre>{safe(tp['text'])}</pre>\n\n"
+        f"Скопируй и отправь:\n"
+        f"<code>/task текст задачи</code>",
         parse_mode="HTML",
     )
-    await callback.answer("Шаблон выбран")
+    await callback.answer()
 
 
 @router.message(Command("search", "find"))
@@ -346,124 +326,104 @@ async def search_handler(message: Message):
         await message.answer("🔍 <code>/search запрос</code>", parse_mode="HTML")
         return
 
-    query_text = query[1].strip()
-    status_msg = await message.answer(
-        f"🔍 Ищу: <i>{safe(query_text)}</i>...",
-        parse_mode="HTML",
-    )
+    qt = query[1].strip()
+    sm = await message.answer(f"🔍 Ищу: <i>{safe(qt)}</i>...", parse_mode="HTML")
 
     try:
         from ddgs import DDGS
 
         results = []
         with DDGS() as ddgs:
-            for r in ddgs.text(query_text, max_results=5):
+            for r in ddgs.text(qt, max_results=5):
                 title = safe(r.get("title", ""))
                 body = safe(r.get("body", ""))
                 link = safe(r.get("href", ""))
                 results.append(f"<b>{title}</b>\n{body}\n🔗 {link}")
 
         if results:
-            text = f"🔍 <b>Результаты: {safe(query_text)}</b>\n\n" + "\n\n".join(results[:5])
-            await status_msg.edit_text(text, parse_mode="HTML")
+            text = f"🔍 <b>Результаты: {safe(qt)}</b>\n\n" + "\n\n".join(results[:5])
+            await sm.edit_text(text, parse_mode="HTML")
         else:
-            await status_msg.edit_text(
-                f"🔍 Нет результатов: <i>{safe(query_text)}</i>",
-                parse_mode="HTML",
+            await sm.edit_text(
+                f"🔍 Нет результатов: <i>{safe(qt)}</i>", parse_mode="HTML"
             )
     except Exception as e:
         logger.error(f"Search error: {e}")
-        await status_msg.edit_text(f"❌ Ошибка: {safe(str(e)[:200])}", parse_mode="HTML")
+        await sm.edit_text(f"❌ Ошибка: {safe(str(e)[:200])}", parse_mode="HTML")
 
 
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
-    if not is_allowed(message.from_user.id):
+    if not allowed(message.from_user.id):
         await message.answer("⛔ Нет доступа.")
         return
 
     prompt = message.text.split(maxsplit=1)
     if len(prompt) < 2:
         await message.answer(
-            "🖼️ <b>Генерация изображений</b>\n\n"
-            "Использование:\n"
+            "🖼️ <b>Генерация картинок</b>\n\n"
             "<code>/image красивый закат над океаном</code>",
             parse_mode="HTML",
         )
         return
 
-    prompt_text = prompt[1].strip()
-    status_msg = await message.answer("🎨 Генерирую изображение...")
+    pt = prompt[1].strip()
+    sm = await message.answer("🎨 Генерирую...")
 
     try:
-        encoded_prompt = urllib.parse.quote(prompt_text)
-        image_url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width=1024&height=1024&nologo=true"
-        )
-
-        photo = URLInputFile(image_url, filename="generated.png")
+        ep = urllib.parse.quote(pt)
+        url = f"https://image.pollinations.ai/prompt/{ep}?width=1024&height=1024&nologo=true"
+        photo = URLInputFile(url, filename="generated.png")
         await message.answer_photo(
             photo=photo,
-            caption=f"🖼️ <b>{safe(prompt_text)}</b>",
+            caption=f"🖼️ <b>{safe(pt)}</b>",
             parse_mode="HTML",
         )
-        await status_msg.delete()
-
+        await sm.delete()
     except Exception as e:
-        logger.error(f"Image generation error: {e}")
-        await status_msg.edit_text(f"❌ Ошибка: {safe(str(e)[:120])}")
+        logger.error(f"Image error: {e}")
+        await sm.edit_text(f"❌ Ошибка: {safe(str(e)[:120])}")
 
 
 @router.message(Command("model"))
 async def model_handler(message: Message):
-    if not is_allowed(message.from_user.id):
+    if not allowed(message.from_user.id):
         await message.answer("⛔ Нет доступа.")
         return
 
     current = await get_chat_model(message.chat.id)
-    buttons = []
-
+    btns = []
     for key, model in FREE_MODELS.items():
         mark = "✅ " if model["id"] == current else ""
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{mark}{model['name']}",
-                    callback_data=f"model:{key}",
-                )
-            ]
+        btns.append(
+            [InlineKeyboardButton(text=f"{mark}{model['name']}", callback_data=f"model:{key}")]
         )
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.answer(
         "🤖 <b>Выбери модель:</b>",
-        reply_markup=keyboard,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(F.data.startswith("model:"))
 async def model_callback(callback: CallbackQuery):
-    if not is_allowed(callback.from_user.id):
-        await callback.answer("⛔ Нет доступа", show_alert=True)
+    if not allowed(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
         return
-
     if not callback.message:
         await callback.answer()
         return
 
-    model_key = callback.data.split(":", 1)[1]
-    if model_key not in FREE_MODELS:
-        await callback.answer("❌ Модель не найдена", show_alert=True)
+    mk = callback.data.split(":", 1)[1]
+    if mk not in FREE_MODELS:
+        await callback.answer("❌ Не найдена", show_alert=True)
         return
 
-    model = FREE_MODELS[model_key]
+    model = FREE_MODELS[mk]
     await set_chat_model(callback.message.chat.id, model["id"])
-
     await callback.message.edit_text(
-        f"✅ <b>Модель изменена!</b>\n\n"
-        f"<b>{safe(model['name'])}</b>\n"
+        f"✅ <b>{safe(model['name'])}</b>\n"
         f"<i>{safe(model['desc'])}</i>\n\n"
         f"<code>{safe(model['id'])}</code>",
         parse_mode="HTML",
@@ -473,14 +433,14 @@ async def model_callback(callback: CallbackQuery):
 
 @router.message(Command("models"))
 async def models_list_handler(message: Message):
-    text = "📋 <b>Доступные модели</b>\n\n"
+    text = "📋 <b>Модели</b>\n\n"
 
-    openrouter_models = [m for m in FREE_MODELS.values() if m.get("provider") != "huggingface"]
+    or_models = [m for m in FREE_MODELS.values() if m.get("provider") != "huggingface"]
     hf_models = [m for m in FREE_MODELS.values() if m.get("provider") == "huggingface"]
 
-    if openrouter_models:
+    if or_models:
         text += "<b>OpenRouter:</b>\n"
-        for m in openrouter_models:
+        for m in or_models:
             text += f"• {safe(m['name'])} — {safe(m['desc'])}\n"
 
     if hf_models:
@@ -493,42 +453,37 @@ async def models_list_handler(message: Message):
 
 @router.message(Command("task"))
 async def task_handler(message: Message):
-    if not is_allowed(message.from_user.id):
+    if not allowed(message.from_user.id):
         await message.answer("⛔ Нет доступа.")
         return
 
-    task_text = message.text.replace("/task", "", 1).strip()
-    if not task_text:
+    tt = message.text.replace("/task", "", 1).strip()
+    if not tt:
         await message.answer(
-            "❌ Укажи задачу так:\n<code>/task описание задачи</code>",
+            "❌ Укажи задачу:\n<code>/task описание задачи</code>",
             parse_mode="HTML",
         )
         return
 
     active = await get_active_task(message.chat.id)
     if active:
-        await message.answer("⚠️ Уже есть активная задача. Используй /stop")
+        await message.answer("⚠️ Есть активная задача. /stop чтобы остановить.")
         return
 
     model = await get_chat_model(message.chat.id)
     team = await get_chat_team(message.chat.id)
+    task = await create_task(message.chat.id, message.from_user.id, tt, model)
 
-    task = await create_task(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id,
-        description=task_text,
-        model=model,
-    )
-
-    model_name = model.split("/")[-1].replace(":free", "")
-    team_str = "".join([AGENT_ROLES.get(a, {}).get("emoji", "") for a in team])
+    mn = model.split("/")[-1].replace(":free", "")
+    te = "".join([AGENT_ROLES.get(a, {}).get("emoji", "") for a in team])
 
     await message.answer(
         f"✅ <b>Задача #{task.id}</b>\n\n"
-        f"📝 <i>{safe(task_text)}</i>\n\n"
-        f"🤖 <b>Модель:</b> <code>{safe(model_name)}</code>\n"
-        f"👥 <b>Команда:</b> {team_str}\n"
-        "🚀 Начинаю обсуждение...",
+        f"📝 <i>{safe(tt)}</i>\n\n"
+        f"🤖 Модель: <code>{safe(mn)}</code>\n"
+        f"👥 Команда: {te}\n"
+        f"📊 Макс. шагов: {task.max_steps}\n"
+        "🚀 Начинаю...",
         parse_mode="HTML",
     )
 
@@ -543,7 +498,7 @@ async def status_handler(message: Message):
         await message.answer("📭 Нет активных задач.")
         return
 
-    status_value = getattr(task.status, "value", str(task.status))
+    sv = getattr(task.status, "value", str(task.status))
     emoji_map = {
         "pending": "⏳",
         "in_progress": "🔄",
@@ -551,11 +506,11 @@ async def status_handler(message: Message):
         "failed": "❌",
         "paused": "⏸",
     }
-    emoji = emoji_map.get(str(status_value).lower(), "❓")
+    emoji = emoji_map.get(str(sv).lower(), "❓")
 
     await message.answer(
         f"📊 <b>Задача #{task.id}</b>\n\n"
-        f"Статус: {emoji} {safe(status_value)}\n"
+        f"Статус: {emoji} {safe(sv)}\n"
         f"Шаг: {task.current_step}/{task.max_steps}",
         parse_mode="HTML",
     )
@@ -563,7 +518,7 @@ async def status_handler(message: Message):
 
 @router.message(Command("stop"))
 async def stop_handler(message: Message):
-    if not is_allowed(message.from_user.id):
+    if not allowed(message.from_user.id):
         await message.answer("⛔ Нет доступа.")
         return
 
