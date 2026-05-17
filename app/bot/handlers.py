@@ -32,6 +32,7 @@ from app.workers.tasks import run_discussion_step
 import logging
 import urllib.parse
 import html
+import io
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -47,6 +48,8 @@ def safe(t):
     return html.escape(str(t or ""))
 
 
+# ===================== /start =====================
+
 @router.message(CommandStart())
 async def start_handler(message: Message):
     m = await get_chat_model(message.chat.id)
@@ -61,6 +64,7 @@ async def start_handler(message: Message):
         "• /templates — шаблоны задач\n"
         "• /image <i>описание</i> — генерация картинки\n"
         "• /search <i>запрос</i> — поиск в интернете\n"
+        "• 🎤 Голосовое — распознавание речи\n"
         "• /team — выбрать команду агентов\n"
         "• /roles — все роли агентов\n"
         "• /model — выбрать модель ИИ\n"
@@ -75,10 +79,14 @@ async def start_handler(message: Message):
     )
 
 
+# ===================== /help =====================
+
 @router.message(Command("help"))
 async def help_handler(message: Message):
     await start_handler(message)
 
+
+# ===================== /roles =====================
 
 @router.message(Command("roles"))
 async def roles_handler(message: Message):
@@ -93,6 +101,8 @@ async def roles_handler(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
+# ===================== /memory =====================
+
 @router.message(Command("memory"))
 async def memory_handler(message: Message):
     mems = await get_memories(message.chat.id)
@@ -105,6 +115,8 @@ async def memory_handler(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
+# ===================== /forget =====================
+
 @router.message(Command("forget"))
 async def forget_handler(message: Message):
     if not allowed(message.from_user.id):
@@ -112,6 +124,8 @@ async def forget_handler(message: Message):
     await clear_memories(message.chat.id)
     await message.answer("🗑️ Память очищена.")
 
+
+# ===================== /team =====================
 
 @router.message(Command("team"))
 async def team_handler(message: Message):
@@ -173,11 +187,7 @@ async def team_callback(callback: CallbackQuery):
         btns.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="team:save")])
 
         cn = "\n".join(
-            [
-                f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-                for a in ct
-                if a in AGENT_ROLES
-            ]
+            [f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}" for a in ct if a in AGENT_ROLES]
         )
         await callback.message.edit_text(
             f"🛠️ <b>Собери команду</b> (2-6 агентов)\n\n<b>Сейчас:</b>\n{cn}",
@@ -190,11 +200,7 @@ async def team_callback(callback: CallbackQuery):
     if tk == "save":
         ct = await get_chat_team(callback.message.chat.id)
         cn = "\n".join(
-            [
-                f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-                for a in ct
-                if a in AGENT_ROLES
-            ]
+            [f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}" for a in ct if a in AGENT_ROLES]
         )
         await callback.message.edit_text(
             f"✅ <b>Команда сохранена!</b>\n\n{cn}",
@@ -210,11 +216,7 @@ async def team_callback(callback: CallbackQuery):
     tp = TEAM_TEMPLATES[tk]
     await set_chat_team(callback.message.chat.id, tp["agents"])
     ts = "\n".join(
-        [
-            f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-            for a in tp["agents"]
-            if a in AGENT_ROLES
-        ]
+        [f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}" for a in tp["agents"] if a in AGENT_ROLES]
     )
     await callback.message.edit_text(
         f"✅ <b>{safe(tp['name'])}</b>\n\n{ts}\n\n<i>{safe(tp['desc'])}</i>",
@@ -268,11 +270,7 @@ async def agent_toggle_callback(callback: CallbackQuery):
     btns.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="team:save")])
 
     cn = "\n".join(
-        [
-            f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}"
-            for a in ct
-            if a in AGENT_ROLES
-        ]
+        [f"{AGENT_ROLES[a]['emoji']} {safe(AGENT_ROLES[a]['name'])}" for a in ct if a in AGENT_ROLES]
     )
     await callback.message.edit_text(
         f"🛠️ <b>Собери команду</b> (2-6 агентов)\n\n<b>Сейчас:</b>\n{cn}",
@@ -280,6 +278,8 @@ async def agent_toggle_callback(callback: CallbackQuery):
         parse_mode="HTML",
     )
 
+
+# ===================== /templates =====================
 
 @router.message(Command("templates"))
 async def templates_handler(message: Message):
@@ -319,6 +319,8 @@ async def template_callback(callback: CallbackQuery):
     await callback.answer()
 
 
+# ===================== /search =====================
+
 @router.message(Command("search", "find"))
 async def search_handler(message: Message):
     query = message.text.split(maxsplit=1)
@@ -344,13 +346,69 @@ async def search_handler(message: Message):
             text = f"🔍 <b>Результаты: {safe(qt)}</b>\n\n" + "\n\n".join(results[:5])
             await sm.edit_text(text, parse_mode="HTML")
         else:
-            await sm.edit_text(
-                f"🔍 Нет результатов: <i>{safe(qt)}</i>", parse_mode="HTML"
-            )
+            await sm.edit_text(f"🔍 Нет результатов: <i>{safe(qt)}</i>", parse_mode="HTML")
     except Exception as e:
         logger.error(f"Search error: {e}")
         await sm.edit_text(f"❌ Ошибка: {safe(str(e)[:200])}", parse_mode="HTML")
 
+
+# ===================== Voice =====================
+
+@router.message(F.voice)
+async def voice_handler(message: Message):
+    if not allowed(message.from_user.id):
+        return
+
+    if not settings.HUGGINGFACE_API_KEY:
+        await message.answer("⚠️ Для голосовых нужен HUGGINGFACE_API_KEY.")
+        return
+
+    status_msg = await message.answer("🎤 Распознаю речь...")
+
+    try:
+        import httpx as hx
+
+        bot = message.bot
+        file = await bot.get_file(message.voice.file_id)
+        buf = io.BytesIO()
+        await bot.download_file(file.file_path, buf)
+        voice_data = buf.getvalue()
+
+        async with hx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api-inference.huggingface.co/models/openai/whisper-large-v3",
+                headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"},
+                content=voice_data,
+            )
+
+            if resp.status_code == 503:
+                await status_msg.edit_text("⏳ Модель Whisper загружается. Попробуй через 20 сек.")
+                return
+
+            if resp.status_code != 200:
+                await status_msg.edit_text(f"❌ Ошибка распознавания: {resp.status_code}")
+                return
+
+            data = resp.json()
+            text = data.get("text", "").strip()
+
+        if not text:
+            await status_msg.edit_text("❌ Не удалось распознать речь.")
+            return
+
+        await status_msg.edit_text(
+            f"🎤 <b>Распознано:</b>\n\n<i>{safe(text)}</i>\n\n"
+            f"👉 Скопируй и отправь:\n"
+            f"<code>/task {safe(text)}</code>",
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        logger.error(f"Voice error: {e}")
+        await status_msg.edit_text(f"❌ {safe(str(e)[:150])}")
+
+
+# ===================== /image =====================
 
 @router.message(Command("image", "img"))
 async def image_handler(message: Message):
@@ -384,6 +442,8 @@ async def image_handler(message: Message):
         logger.error(f"Image error: {e}")
         await sm.edit_text(f"❌ Ошибка: {safe(str(e)[:120])}")
 
+
+# ===================== /model =====================
 
 @router.message(Command("model"))
 async def model_handler(message: Message):
@@ -431,6 +491,8 @@ async def model_callback(callback: CallbackQuery):
     await callback.answer(f"Выбрана: {model['name']}")
 
 
+# ===================== /models =====================
+
 @router.message(Command("models"))
 async def models_list_handler(message: Message):
     text = "📋 <b>Модели</b>\n\n"
@@ -450,6 +512,8 @@ async def models_list_handler(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
+
+# ===================== /task =====================
 
 @router.message(Command("task"))
 async def task_handler(message: Message):
@@ -482,7 +546,7 @@ async def task_handler(message: Message):
         f"📝 <i>{safe(tt)}</i>\n\n"
         f"🤖 Модель: <code>{safe(mn)}</code>\n"
         f"👥 Команда: {te}\n"
-        f"📊 Макс. шагов: {task.max_steps}\n"
+        f"📊 Шагов: {task.max_steps}\n"
         "🚀 Начинаю...",
         parse_mode="HTML",
     )
@@ -490,6 +554,8 @@ async def task_handler(message: Message):
     run_discussion_step.delay(task.id)
     logger.info(f"Task {task.id} model={model} team={team}")
 
+
+# ===================== /status =====================
 
 @router.message(Command("status"))
 async def status_handler(message: Message):
@@ -516,6 +582,8 @@ async def status_handler(message: Message):
     )
 
 
+# ===================== /stop =====================
+
 @router.message(Command("stop"))
 async def stop_handler(message: Message):
     if not allowed(message.from_user.id):
@@ -530,6 +598,8 @@ async def stop_handler(message: Message):
     await update_task_status(task.id, TaskStatus.COMPLETED, "Остановлено пользователем.")
     await message.answer(f"🛑 Задача #{task.id} остановлена.")
 
+
+# ===================== Catch-all =====================
 
 @router.message(F.text)
 async def echo_handler(message: Message):
