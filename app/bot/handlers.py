@@ -376,7 +376,7 @@ async def voice_handler(message: Message):
 
         async with hx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://api-inference.huggingface.co/models/openai/whisper-large-v3",
+                "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3",
                 headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"},
                 content=voice_data,
             )
