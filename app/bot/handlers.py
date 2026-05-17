@@ -374,10 +374,13 @@ async def voice_handler(message: Message):
         await bot.download_file(file.file_path, buf)
         voice_data = buf.getvalue()
 
-        async with hx.AsyncClient(timeout=30) as client:
+        async with hx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://router.huggingface.co/hf-inference/models/openai/whisper-large-v3",
-                headers={"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"},
+                headers={
+                    "Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}",
+                    "Content-Type": "audio/ogg",
+                },
                 content=voice_data,
             )
 
@@ -386,7 +389,8 @@ async def voice_handler(message: Message):
                 return
 
             if resp.status_code != 200:
-                await status_msg.edit_text(f"❌ Ошибка распознавания: {resp.status_code}")
+                logger.error(f"Whisper error: {resp.status_code} - {resp.text[:300]}")
+                await status_msg.edit_text(f"❌ Ошибка: {resp.status_code}")
                 return
 
             data = resp.json()
