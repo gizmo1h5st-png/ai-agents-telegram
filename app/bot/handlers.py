@@ -276,6 +276,112 @@ async def agent_toggle_callback(callback: CallbackQuery):
 
 # ===================== /templates =====================
 
+@router.message(Command("agentmodel"))
+async def agentmodel_handler(message: Message):
+    if not allowed(message.from_user.id):
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    team = await get_chat_team(message.chat.id)
+    agent_mdls = await get_agent_models(message.chat.id)
+    default = await get_chat_model(message.chat.id)
+
+    btns = []
+    for a in team:
+        if a not in AGENT_ROLES:
+            continue
+        agent = AGENT_ROLES[a]
+        current = agent_mdls.get(a, default)
+        short = current.split("/")[-1].replace(":free", "")[:20]
+        btns.append([
+            InlineKeyboardButton(
+                text=f"{agent['emoji']} {agent['name']}: {short}",
+                callback_data=f"amodel:{a}",
+            )
+        ])
+    btns.append([InlineKeyboardButton(text="🔄 Сбросить все на default", callback_data="amodel:reset")])
+
+    await message.answer(
+        "🎛️ <b>Модели для агентов</b>\n\n"
+        "У каждого агента может быть своя модель.\n"
+        "Выбери агента для изменения:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("amodel:"))
+async def amodel_callback(callback: CallbackQuery):
+    if not allowed(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+
+    key = callback.data.split(":", 1)[1]
+
+    if key == "reset":
+        await clear_agent_models(callback.message.chat.id)
+        await callback.message.edit_text("✅ Все агенты используют общую модель.", parse_mode="HTML")
+        await callback.answer("Сброшено")
+        return
+
+    if key not in AGENT_ROLES:
+        await callback.answer("❌", show_alert=True)
+        return
+
+    agent = AGENT_ROLES[key]
+    btns = []
+    for mk, model in FREE_MODELS.items():
+        btns.append([
+            InlineKeyboardButton(
+                text=model["name"],
+                callback_data=f"setam:{key}:{mk}",
+            )
+        ])
+
+    await callback.message.edit_text(
+        f"🎛️ Модель для {agent['emoji']} <b>{safe(agent['name'])}</b>\n\n"
+        "Выбери модель:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setam:"))
+async def setam_callback(callback: CallbackQuery):
+    if not allowed(callback.from_user.id):
+        await callback.answer("⛔", show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("❌", show_alert=True)
+        return
+
+    agent_key = parts[1]
+    model_key = parts[2]
+
+    if agent_key not in AGENT_ROLES or model_key not in FREE_MODELS:
+        await callback.answer("❌", show_alert=True)
+        return
+
+    agent = AGENT_ROLES[agent_key]
+    model = FREE_MODELS[model_key]
+
+    await set_agent_model(callback.message.chat.id, agent_key, model["id"])
+
+    await callback.message.edit_text(
+        f"✅ {agent['emoji']} <b>{safe(agent['name'])}</b>\n\n"
+        f"Модель: <code>{safe(model['id'])}</code>",
+        parse_mode="HTML",
+    )
+    await callback.answer(f"{agent['name']} → {model['name']}")
 @router.message(Command("templates"))
 async def templates_handler(message: Message):
     btns = []
