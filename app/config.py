@@ -43,19 +43,32 @@ settings = Settings()
 
 
 FREE_MODELS = {
-    # === OpenRouter (8 проверенных) ===
-    "deepseek": {"id": "deepseek/deepseek-v4-flash:free", "name": "🚀 DeepSeek V4", "desc": "Быстрая и стабильная", "provider": "openrouter"},
-    "nemotron": {"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "name": "🟢 Nemotron 30B", "desc": "Reasoning от NVIDIA", "provider": "openrouter"},
-    "trinity": {"id": "arcee-ai/trinity-large-thinking:free", "name": "🔺 Trinity", "desc": "Глубокое мышление", "provider": "openrouter"},
+    # === OpenRouter ===
+    "deepseek-v4": {"id": "deepseek/deepseek-v4-flash:free", "name": "🚀 DeepSeek V4 Flash", "desc": "Быстрая и стабильная", "provider": "openrouter"},
+    "deepseek-r1": {"id": "deepseek/deepseek-r1:free", "name": "🧠 DeepSeek R1", "desc": "Reasoning, логика", "provider": "openrouter"},
+    "deepseek-chat": {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "💬 DeepSeek Chat V3", "desc": "Чат, контент", "provider": "openrouter"},
+    "llama4": {"id": "meta-llama/llama-4-maverick:free", "name": "🦙 Llama 4 Maverick", "desc": "1M контекст, Meta", "provider": "openrouter"},
+    "qwen3": {"id": "qwen/qwen3-235b-a22b:free", "name": "🌟 Qwen3 235B", "desc": "Код и анализ", "provider": "openrouter"},
+    "qwen-coder": {"id": "qwen/qwen3-coder:free", "name": "💻 Qwen3 Coder", "desc": "Для кода", "provider": "openrouter"},
+    "grok-mini": {"id": "x-ai/grok-3-mini-beta:free", "name": "⚡ Grok 3 Mini", "desc": "Быстрый от xAI", "provider": "openrouter"},
+    "gemma4": {"id": "google/gemma-4-31b-it:free", "name": "💎 Gemma 4 31B", "desc": "Google, эффективная", "provider": "openrouter"},
+    "gemma3": {"id": "google/gemma-3-27b-it:free", "name": "💎 Gemma 3 27B", "desc": "Лёгкая от Google", "provider": "openrouter"},
+    "mistral": {"id": "mistralai/mistral-small-3.1-24b-instruct:free", "name": "🌀 Mistral 24B", "desc": "Баланс скорость/качество", "provider": "openrouter"},
+    "nemotron-120b": {"id": "nvidia/nemotron-3-super-120b-a12b:free", "name": "🟢 Nemotron 120B", "desc": "NVIDIA, код и reasoning", "provider": "openrouter"},
+    "nemotron-30b": {"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "name": "🟢 Nemotron 30B", "desc": "NVIDIA Reasoning", "provider": "openrouter"},
+    "glm4": {"id": "zhipu-ai/glm-4-32b:free", "name": "🇨🇳 GLM-4 32B", "desc": "Мультиязычная", "provider": "openrouter"},
+    "glm45": {"id": "z-ai/glm-4.5-air:free", "name": "🇨🇳 GLM-4.5 Air", "desc": "Агентные задачи", "provider": "openrouter"},
+    "hermes": {"id": "nousresearch/hermes-3-llama-3.1-70b:free", "name": "🔮 Hermes 3 70B", "desc": "Ролевые задачи", "provider": "openrouter"},
+    "gpt-120b": {"id": "openai/gpt-oss-120b:free", "name": "🤖 GPT-OSS 120B", "desc": "Большая open-source", "provider": "openrouter"},
+    "gpt-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная", "provider": "openrouter"},
+    "trinity": {"id": "arcee-ai/trinity-large-thinking:free", "name": "🔺 Trinity", "desc": "Thinking", "provider": "openrouter"},
     "laguna": {"id": "poolside/laguna-xs.2:free", "name": "🏊 Laguna", "desc": "Poolside", "provider": "openrouter"},
     "owl": {"id": "openrouter/owl-alpha", "name": "🦉 Owl Alpha", "desc": "Экспериментальная", "provider": "openrouter"},
-    "gpt-120b": {"id": "openai/gpt-oss-120b:free", "name": "🤖 GPT-OSS 120B", "desc": "Большая", "provider": "openrouter"},
-    "gpt-20b": {"id": "openai/gpt-oss-20b:free", "name": "🤖 GPT-OSS 20B", "desc": "Компактная", "provider": "openrouter"},
     "lfm": {"id": "liquid/lfm-2.5-1.2b-instruct:free", "name": "💧 LFM", "desc": "Liquid AI", "provider": "openrouter"},
-    # === HuggingFace (3 проверенных) ===
-    "hf-deepseek": {"id": "deepseek-ai/DeepSeek-R1", "name": "🧠 HF DeepSeek R1", "desc": "HuggingFace Reasoning", "provider": "huggingface"},
-    "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1", "desc": "HuggingFace Meta", "provider": "huggingface"},
-    "hf-qwen": {"id": "Qwen/Qwen2.5-72B-Instruct", "name": "🌟 HF Qwen 72B", "desc": "HuggingFace Alibaba", "provider": "huggingface"},
+    # === HuggingFace ===
+    "hf-deepseek": {"id": "deepseek-ai/DeepSeek-R1", "name": "🧠 HF DeepSeek R1", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1", "desc": "HuggingFace", "provider": "huggingface"},
+    "hf-qwen": {"id": "Qwen/Qwen2.5-72B-Instruct", "name": "🌟 HF Qwen 72B", "desc": "HuggingFace", "provider": "huggingface"},
 }
 
 
