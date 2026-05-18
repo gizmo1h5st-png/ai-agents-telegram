@@ -120,3 +120,47 @@ async def clear_memories(chat_id):
         for m in mems.scalars().all():
             await session.delete(m)
         await session.commit()
+
+import json as _json
+
+async def get_agent_models(chat_id):
+    async with get_session() as session:
+        result = await session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
+        cs = result.scalar_one_or_none()
+        if cs and cs.agent_models:
+            try:
+                return _json.loads(cs.agent_models)
+            except:
+                pass
+        return {}
+
+async def set_agent_model(chat_id, agent_role, model_id):
+    async with get_session() as session:
+        result = await session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
+        cs = result.scalar_one_or_none()
+        if not cs:
+            cs = ChatSettings(chat_id=chat_id)
+            session.add(cs)
+        
+        current = {}
+        if cs.agent_models:
+            try:
+                current = _json.loads(cs.agent_models)
+            except:
+                pass
+        
+        if model_id:
+            current[agent_role] = model_id
+        elif agent_role in current:
+            del current[agent_role]
+        
+        cs.agent_models = _json.dumps(current)
+        await session.commit()
+
+async def clear_agent_models(chat_id):
+    async with get_session() as session:
+        result = await session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
+        cs = result.scalar_one_or_none()
+        if cs:
+            cs.agent_models = None
+            await session.commit()
