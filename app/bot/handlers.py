@@ -64,6 +64,7 @@ async def start_handler(message: Message):
         "• /roles — все роли агентов\n"
         "• /model — выбрать модель ИИ\n"
         "• /models — список моделей\n"
+        "• /agentmodel — модель для каждого агента\n"
         "• /memory — память агентов\n"
         "• /forget — очистить память\n"
         "• /status — статус задачи\n"
