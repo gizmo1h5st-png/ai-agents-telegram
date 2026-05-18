@@ -6,7 +6,6 @@ from app.db.models import Base
 import logging
 
 logger = logging.getLogger(__name__)
-
 engine = create_async_engine(settings.async_database_url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True)
 async_session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -19,6 +18,7 @@ async def init_db():
                 "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model VARCHAR(200)",
                 "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tokens_used INTEGER DEFAULT 0",
                 "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS team VARCHAR(500)",
+                "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS agent_models TEXT",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS msg_type VARCHAR(30) DEFAULT 'broadcast'",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS tokens INTEGER DEFAULT 0",
             ]:
