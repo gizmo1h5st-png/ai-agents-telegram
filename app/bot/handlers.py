@@ -14,17 +14,12 @@ from app.config import (
     AGENT_ROLES,
     TEAM_TEMPLATES,
     TASK_TEMPLATES,
-)
+
 from app.db.crud import (
-    create_task,
-    get_active_task,
-    update_task_status,
-    get_chat_model,
-    set_chat_model,
-    get_chat_team,
-    set_chat_team,
-    get_memories,
-    clear_memories,
+    create_task, get_active_task, update_task_status,
+    get_chat_model, set_chat_model, get_chat_team, set_chat_team,
+    get_memories, clear_memories,
+    get_agent_models, set_agent_model, clear_agent_models,
 )
 from app.db.models import TaskStatus
 from app.workers.tasks import run_discussion_step
