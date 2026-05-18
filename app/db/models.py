@@ -68,5 +68,6 @@ class ChatSettings(Base):
     chat_id = Column(BigInteger, nullable=False, unique=True, index=True)
     model = Column(String(200), nullable=True)
     team = Column(String(500), nullable=True)
+    agent_models = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
