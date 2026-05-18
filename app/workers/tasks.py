@@ -243,7 +243,23 @@ def run_discussion_step(self, task_id):
         if ak == "coordinator" and task["current_step"] < 6:
             full_prompt += "\n\n⚠️ Сейчас шаг " + str(task["current_step"]+1) + ". Ещё рано для финального ответа. Сначала пусть команда обсудит."
 
+                # Определяем модель: персональная агента > общая задачи > default
+        import json as _json
         task_model = task.get("model") or settings.DEFAULT_MODEL
+        try:
+            import psycopg2 as _pg
+            _conn2 = psycopg2.connect(db_url)
+            _cur2 = _conn2.cursor()
+            _cur2.execute("SELECT agent_models FROM chat_settings WHERE chat_id = %s", (task["chat_id"],))
+            _row = _cur2.fetchone()
+            _conn2.close()
+            if _row and _row[0]:
+                _am = _json.loads(_row[0])
+                if ak in _am:
+                    task_model = _am[ak]
+        except:
+            pass
+        
         response = call_llm(full_prompt, llm_msgs, task["description"], task_model)
 
         log_usage(task_id, task_model)
