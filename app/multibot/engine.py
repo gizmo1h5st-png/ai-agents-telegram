@@ -115,7 +115,27 @@ class AgentBot:
         @self.router.callback_query(F.data.startswith("am:"))
         async def agent_model_cb(callback: CallbackQuery):
             await self._set_agent_model(callback)
-        
+
+                @self.router.callback_query(F.data.startswith("cmd:"))
+        async def cmd_cb(callback: CallbackQuery):
+            if self.role != "coordinator":
+                await callback.answer()
+                return
+            chat_id = callback.message.chat.id
+            cmd = callback.data.split(":")[1]
+            if cmd == "model":
+                await self._show_model_picker(chat_id)
+            elif cmd == "agentmodel":
+                await self._show_agent_model_picker(chat_id)
+            elif cmd == "models":
+                await self._show_models_list(chat_id)
+            elif cmd == "config":
+                await self._show_config(chat_id)
+            elif cmd == "steps":
+                await self._show_steps_picker(chat_id)
+            elif cmd == "delay":
+                await self._show_delay_picker(chat_id)
+            await callback.answer()
         @self.router.callback_query(F.data == "resetmodels")
         async def reset_cb(callback: CallbackQuery):
             chat_id = callback.message.chat.id
