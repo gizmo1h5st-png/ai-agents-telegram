@@ -16,16 +16,72 @@ ROLE_ORDER = ["coordinator", "researcher", "critic", "executor"]
 FALLBACK_MODELS = ["deepseek/deepseek-chat-v3-0324:free", "meta-llama/llama-4-scout:free", "mistralai/mistral-small-3.1-24b-instruct:free", "google/gemma-3-27b-it:free", "deepseek-ai/DeepSeek-R1"]
 
 
-def detect_next_agent(text):
-    t = text.lower()
-    if "@researcher1_ai_bot" in t or "исследователь" in t:
-        return "researcher"
-    if "@criticaibot_bot" in t or "критик" in t:
-        return "critic"
-    if "@executorai_ai_bot" in t or "исполнитель" in t:
-        return "executor"
-    if "@coordinator_ai_bot" in t or "координатор" in t:
-        return "coordinator"
+AGENT_MENTIONS = {
+    "coordinator": ("@coordintor_ai_bot", "@coordinator_ai_bot"),  # второй — legacy-алиас для старых сообщений
+    "researcher": ("@researcher1_ai_bot",),
+    "critic": ("@criticaibot_bot",),
+    "executor": ("@executorai_ai_bot",),
+}
+
+AGENT_NAME_PATTERNS = {
+    "coordinator": (r"\bкоординатор(?:у|а|ом|е)?\b",),
+    "researcher": (r"\bисследователь(?:ю|я|ем|е)?\b",),
+    "critic": (r"\bкритик(?:у|а|ом|е)?\b",),
+    "executor": (r"\bисполнитель(?:ю|я|ем|е)?\b",),
+}
+
+TURN_MARKERS = (
+    "передаю", "передать", "передай", "слово", "следующий", "следующая",
+    "пусть", "обратимся", "назначаю", "вызываю", "далее"
+)
+
+CORRECT_USERNAMES_PROMPT = """
+
+ВАЖНО: правильные usernames агентов в Telegram:
+- Координатор: @coordintor_ai_bot
+- Исследователь: @Researcher1_ai_bot
+- Критик: @criticaibot_bot
+- Исполнитель: @executorai_ai_bot
+
+Не придумывай диалог за других агентов. Не задавай вопросы самому себе.
+В конце ответа, если обсуждение не завершено, передай ход ровно одному ДРУГОМУ агенту через его @username.
+Никогда не передавай ход самому себе.
+"""
+
+
+def normalize_agent_mentions(text):
+    """Исправляет старые/ошибочные упоминания перед отправкой и парсингом."""
+    if not text:
+        return text
+    return text.replace("@coordinator_ai_bot", "@coordintor_ai_bot")
+
+
+def detect_next_agent(text, current_role=None):
+    """Определяет следующего агента по ЯВНОЙ передаче хода.
+
+    Важно: не выбираем агента только потому, что он назвал свою роль
+    (например: "Как исследователь, ..."). Это и вызывало самодиалог
+    Researcher -> Researcher.
+    """
+    t = (text or "").lower()
+
+    # 1) Явные @mentions имеют приоритет.
+    # Если агент упомянул самого себя, игнорируем это и ищем другого адресата.
+    for role in ROLE_ORDER:
+        if role == current_role:
+            continue
+        if any(m in t for m in AGENT_MENTIONS.get(role, ())):
+            return role
+
+    # 2) Названия ролей считаем адресатом только рядом с маркерами передачи хода.
+    if any(marker in t for marker in TURN_MARKERS):
+        for role in ROLE_ORDER:
+            if role == current_role:
+                continue
+            for pattern in AGENT_NAME_PATTERNS.get(role, ()):
+                if re.search(pattern, t):
+                    return role
+
     return None
 
 
@@ -384,7 +440,7 @@ class AgentBot:
 
     async def _think_and_reply(self, cid, tid, td, hist, steps):
         step = steps + 1
-        prompt = self.config["prompt"]
+        prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT
         ms = await self._get_max_steps(cid)
         if self.role == "coordinator" and step < 5:
             prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа."
@@ -393,6 +449,7 @@ class AgentBot:
         response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model)
         if not response:
             return
+        response = normalize_agent_mentions(response)
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
             r = await asyncio.to_thread(search_web, q)
@@ -418,7 +475,7 @@ class AgentBot:
             await self.redis.delete(f"active_task:{cid}")
             await self.bot.send_message(cid, "✅ Завершено!")
             return
-        na = detect_next_agent(response)
+        na = detect_next_agent(response, current_role=self.role)
         if not na:
             idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
             na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
