@@ -562,9 +562,22 @@ class AgentBot:
         model = await self._get_model(chat_id)
         response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, model)
 
-        if not response:
-            await asyncio.sleep(15)
-            return
+              if not response:
+            # Fallback: попробовать другую модель
+            fallback_models = ["deepseek/deepseek-chat-v3-0324:free", "meta-llama/llama-4-scout:free", "mistralai/mistral-small-3.1-24b-instruct:free"]
+            for fb in fallback_models:
+                if fb != model:
+                    response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, fb)
+                    if response:
+                        logger.info(f"Fallback to {fb} succeeded")
+                        break
+            if not response:
+                await asyncio.sleep(10)
+                # Retry с той же моделью
+                response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, model)
+            if not response:
+                logger.error(f"All models failed for task {task_id}")
+                return
 
         search_results = ""
         for query in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
