@@ -313,4 +313,3 @@ def get_llm_router_status() -> Dict[str, Any]:
         "cache_ttl_seconds": _CACHE_TTL_SECONDS,
         "providers": providers,
     }
-
