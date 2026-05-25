@@ -96,12 +96,13 @@ STRUCTURED_OUTPUT_PROMPT = """
 }
 
 Правила JSON:
-- message: твой ответ пользователю и команде.
+- message: только текст твоего ответа, БЕЗ JSON, БЕЗ обращения к самому себе, БЕЗ ```json.
 - next_agent: следующий агент, если final=false. Нельзя указывать самого себя.
 - final: true только если это финальный ответ по задаче.
 - Если final=true, message ОБЯЗАТЕЛЬНО начинается с [ФИНАЛЬНЫЙ ОТВЕТ], а next_agent должен быть null.
 - Если final=false, next_agent должен быть одним из ДРУГИХ агентов.
 - Не добавляй реплики от имени других агентов.
+- Не начинай message с названия своей роли, например "Критик, ..." или "Исследователь, ...".
 """
 
 
@@ -189,14 +190,89 @@ def _extract_json_object(raw):
     return m.group(0) if m else None
 
 
+def _strip_code_fences(text):
+    if not text:
+        return text
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE).strip()
+    t = re.sub(r"\s*```$", "", t).strip()
+    return t
+
+
+def _extract_json_string_field(raw, field):
+    """Достаёт строковое поле из JSON даже если JSON обрезан/невалиден."""
+    if not raw:
+        return None
+    m = re.search(r'"' + re.escape(field) + r'"\s*:\s*"', raw)
+    if not m:
+        return None
+    i = m.end()
+    out = []
+    esc = False
+    while i < len(raw):
+        ch = raw[i]
+        if esc:
+            if ch == "n":
+                out.append("\n")
+            elif ch == "t":
+                out.append("\t")
+            elif ch == "r":
+                out.append("\r")
+            elif ch in ('"', "\\", "/"):
+                out.append(ch)
+            else:
+                out.append(ch)
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            return "".join(out).strip()
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out).strip() if out else None
+
+
+def _extract_json_bool_field(raw, field):
+    m = re.search(r'"' + re.escape(field) + r'"\s*:\s*(true|false)', raw or "", flags=re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).lower() == "true"
+
+
+def sanitize_visible_agent_message(message, current_role=None):
+    """Чистит то, что будет показано в Telegram: убирает JSON/code-fence мусор и самообращение."""
+    msg = _strip_code_fences(message or "").strip()
+
+    # Если в fallback попал почти-JSON, пытаемся вытащить message.
+    extracted = _extract_json_string_field(msg, "message")
+    if extracted:
+        msg = extracted.strip()
+
+    # Убираем грубое обращение агента к самому себе в начале ответа.
+    if current_role:
+        names = {
+            "coordinator": ["координатор", "@coordintor_ai_bot", "@coordinator_ai_bot"],
+            "researcher": ["исследователь", "@researcher1_ai_bot"],
+            "critic": ["критик", "@criticaibot_bot"],
+            "executor": ["исполнитель", "@executorai_ai_bot"],
+        }.get(current_role, [])
+        for name in names:
+            msg = re.sub(rf"^\s*{re.escape(name)}\s*(?:\([^)]*\))?\s*[,：:;—-]+\s*", "", msg, flags=re.IGNORECASE)
+
+    return normalize_agent_mentions(msg).strip()
+
+
 def parse_structured_agent_response(raw, current_role=None):
     """Возвращает (message, next_agent, final, parsed_ok). Совместим со старым текстовым форматом."""
     raw = normalize_agent_mentions(raw or "")
-    obj_txt = _extract_json_object(raw)
+    cleaned_raw = _strip_code_fences(raw)
+    obj_txt = _extract_json_object(cleaned_raw)
+
     if obj_txt:
         try:
             data = json.loads(obj_txt)
-            message = normalize_agent_mentions(str(data.get("message", "")).strip())
+            message = sanitize_visible_agent_message(str(data.get("message", "")).strip(), current_role=current_role)
             next_agent = data.get("next_agent", None)
             final = bool(data.get("final", False))
 
@@ -213,7 +289,7 @@ def parse_structured_agent_response(raw, current_role=None):
                 next_agent = None
 
             if not message:
-                message = raw.strip()
+                message = sanitize_visible_agent_message(cleaned_raw, current_role=current_role)
             if is_final_response(message):
                 final = True
                 next_agent = None
@@ -226,7 +302,26 @@ def parse_structured_agent_response(raw, current_role=None):
         except Exception as e:
             logger.warning(f"Structured JSON parse failed: {str(e)[:120]}")
 
-    message = raw.strip()
+    # Partial JSON fallback: если модель начала ```json {"message": ... и не закрыла JSON.
+    partial_message = _extract_json_string_field(cleaned_raw, "message")
+    partial_next = _extract_json_string_field(cleaned_raw, "next_agent")
+    partial_final = _extract_json_bool_field(cleaned_raw, "final")
+    if partial_message:
+        message = sanitize_visible_agent_message(partial_message, current_role=current_role)
+        next_agent = (partial_next or "").strip().lower() or None
+        if next_agent in ("none", "null", "-", "нет"):
+            next_agent = None
+        if next_agent not in ROLE_ORDER or next_agent == current_role:
+            next_agent = None
+        final = bool(partial_final) or is_final_response(message)
+        if final:
+            next_agent = None
+            if not is_final_response(message):
+                message = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + message
+        return message, next_agent, final, False
+
+    # Backward-compatible fallback: старый свободный текст, но без code fences.
+    message = sanitize_visible_agent_message(cleaned_raw, current_role=current_role)
     final = is_final_response(message)
     next_agent = None if final else detect_next_agent(message, current_role=current_role)
     return message, next_agent, final, False
