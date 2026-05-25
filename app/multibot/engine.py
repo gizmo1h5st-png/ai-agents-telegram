@@ -551,8 +551,9 @@ class AgentBot:
         await asyncio.sleep(2)
         await self._think_and_reply(chat_id, task_id, task, [], 0)
 
-    async def _think_and_reply(self, chat_id, task_id, task_desc, history, steps):
+        async def _think_and_reply(self, chat_id, task_id, task_desc, history, steps):
         step = steps + 1
+
         prompt = self.config["prompt"]
         max_steps = await self._get_max_steps(chat_id)
         if self.role == "coordinator" and step < 5:
@@ -562,22 +563,23 @@ class AgentBot:
         model = await self._get_model(chat_id)
         response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, model)
 
-              if not response:
-            # Fallback: попробовать другую модель
-            fallback_models = ["deepseek/deepseek-chat-v3-0324:free", "meta-llama/llama-4-scout:free", "mistralai/mistral-small-3.1-24b-instruct:free"]
-            for fb in fallback_models:
+        if not response:
+            fallbacks = [
+                "deepseek/deepseek-chat-v3-0324:free",
+                "meta-llama/llama-4-scout:free",
+                "mistralai/mistral-small-3.1-24b-instruct:free",
+            ]
+            for fb in fallbacks:
                 if fb != model:
                     response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, fb)
                     if response:
-                        logger.info(f"Fallback to {fb} succeeded")
+                        logger.info(f"Fallback to {fb}")
                         break
-            if not response:
-                await asyncio.sleep(10)
-                # Retry с той же моделью
-                response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, model)
-            if not response:
-                logger.error(f"All models failed for task {task_id}")
-                return
+        if not response:
+            await asyncio.sleep(10)
+            response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, task_desc, model)
+        if not response:
+            return
 
         search_results = ""
         for query in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
