@@ -512,7 +512,45 @@ class AgentBot:
         await self.bot.delete_webhook(drop_pending_updates=True)
         me = await self.bot.get_me()
         logger.info(f"🤖 {self.config['emoji']} {self.config['name']} (@{me.username}) started")
+        asyncio.create_task(self._poll_pending())
         await self.dp.start_polling(self.bot)
 
-    async def stop(self):
-        await self.bot.session.close()
+    async def _poll_pending(self):
+        """Проверяет очередь — есть ли задача для этого бота"""
+        while True:
+            await asyncio.sleep(3)
+            try:
+                keys = []
+                async for key in self.redis.scan_iter(f"pending:*:{self.role}"):
+                    keys.append(key)
+                for key in keys:
+                    val = await self.redis.get(key)
+                    if not val:
+                        continue
+                    await self.redis.delete(key)
+                    parts = key.decode().split(":")
+                    chat_id = int(parts[1])
+                    val_str = val.decode()
+                    task_id = int(val_str.split(":")[0])
+                    task_desc = ":".join(val_str.split(":")[1:])
+                    # Проверяем что задача ещё активна
+                    active = await self.redis.get(f"active_task:{chat_id}")
+                    if not active:
+                        continue
+                    # Проверяем turn
+                    ct = await self.redis.get(f"turn:{chat_id}:{task_id}")
+                    if ct and ct.decode() != self.role:
+                        continue
+                    # Проверяем rate limit
+                    delay = await self._get_delay(chat_id)
+                    rk = f"rate:{self.role}:{chat_id}"
+                    last = await self.redis.get(rk)
+                    if last and (time.time() - float(last)) < delay:
+                        await asyncio.sleep(delay)
+                    # Собираем историю и отвечаем
+                    history = await self._get_history(chat_id, task_id)
+                    sr = await self.redis.get(f"steps:{chat_id}:{task_id}")
+                    steps = int(sr) if sr else 0
+                    await self._think_and_reply(chat_id, task_id, task_desc, history, steps)
+            except Exception as e:
+                logger.error(f"Poll pending error: {e}")
