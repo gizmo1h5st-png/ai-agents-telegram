@@ -114,6 +114,24 @@ def clean_feedback_text(text):
     return cleaned or (text or "").strip()
 
 
+FINAL_PATTERNS = (
+    r"\[\s*финальн(?:ый|ая|ое)\s+ответ\s*\]",
+    r"\[\s*final\s*\]",
+    r"^\s*финальн(?:ый|ая|ое)\s+ответ\s*[:：]",
+    r"^\s*итогов(?:ый|ая|ое)\s+ответ\s*[:：]",
+    r"^\s*итог\s*[:：]",
+    r"^\s*окончательн(?:ый|ая|ое)\s+ответ\s*[:：]",
+    r"обсуждение\s+завершено",
+    r"задача\s+завершена",
+)
+
+
+def is_final_response(text):
+    """Распознаёт финальный ответ в разных форматах, а не только строго [ФИНАЛЬНЫЙ ОТВЕТ]."""
+    t = (text or "").strip().lower()
+    return any(re.search(pattern, t, flags=re.IGNORECASE | re.MULTILINE) for pattern in FINAL_PATTERNS)
+
+
 def detect_next_agent(text, current_role=None):
     """Определяет следующего агента по ЯВНОЙ передаче хода.
 
@@ -475,8 +493,12 @@ class AgentBot:
             return
         if is_human and text.strip().lower() == "/stop":
             if self.role == "coordinator":
-                await self.redis.delete(f"active_task:{cid}")
-                await self.bot.send_message(cid, "🛑 Остановлено.")
+                active = await self.redis.get(f"active_task:{cid}")
+                if active:
+                    await self._clear_task_runtime_keys(cid, int(active.decode()))
+                else:
+                    await self.redis.delete(f"active_task:{cid}")
+                await self.bot.send_message(cid, "🛑 Остановлено. Все pending-ходы очищены.")
             return
 
         # Пользователь может вмешаться в ход обсуждения и дать замечание конкретному агенту.
@@ -761,6 +783,26 @@ class AgentBot:
         await asyncio.sleep(2)
         await self._think_and_reply(cid, tid, task, [], 0)
 
+    async def _clear_task_runtime_keys(self, cid, tid):
+        """Удаляет все runtime-ключи задачи, чтобы старые pending не крутили завершённую задачу."""
+        await self.redis.delete(f"active_task:{cid}")
+        await self.redis.delete(f"turn:{cid}:{tid}")
+        await self.redis.delete(f"final_reason:{cid}:{tid}")
+        await self.redis.delete(f"llm_fail:{cid}:{tid}")
+        await self.redis.delete(f"finalizing:{cid}:{tid}")
+        for role in ROLE_ORDER:
+            await self.redis.delete(f"pending:{cid}:{role}")
+            await self.redis.delete(f"rate:{role}:{cid}")
+
+    async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены."):
+        """Единая точка завершения задачи."""
+        await self._clear_task_runtime_keys(cid, tid)
+        if completion_message:
+            try:
+                await self.bot.send_message(cid, completion_message)
+            except Exception:
+                pass
+
     async def _force_finalize(self, cid, tid, td, reason="Достигнут лимит обсуждения."):
         """Принудительно завершает задачу, чтобы обсуждение не зависало бесконечно."""
         lock_key = f"finalizing:{cid}:{tid}"
@@ -790,7 +832,7 @@ class AgentBot:
                 )
 
             response = normalize_agent_mentions(response)
-            if "[ФИНАЛЬНЫЙ ОТВЕТ]" not in response and "[FINAL]" not in response:
+            if not is_final_response(response):
                 response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + response
 
             msg = f"🎯 {response}"
@@ -798,13 +840,10 @@ class AgentBot:
                 msg = msg[:4000] + "..."
             await self.bot.send_message(cid, msg)
             await self._save_message(cid, tid, "Координатор", msg)
-            await self.redis.delete(f"active_task:{cid}")
-            await self.redis.delete(f"llm_fail:{cid}:{tid}")
-            await self.redis.delete(f"turn:{cid}:{tid}")
-            await self.bot.send_message(cid, "✅ Завершено.")
+            await self._complete_task(cid, tid, "✅ Завершено. Задача закрыта, дальнейшие ходы остановлены.")
         except Exception as e:
             logger.error(f"Force finalize error: {e}")
-            await self.redis.delete(f"active_task:{cid}")
+            await self._clear_task_runtime_keys(cid, tid)
             try:
                 await self.bot.send_message(cid, f"✅ Обсуждение остановлено по лимиту/ошибке. Причина: {str(e)[:120]}")
             except Exception:
@@ -817,6 +856,11 @@ class AgentBot:
         await self.redis.setex(f"pending:{cid}:coordinator", 300, f"{tid}:{td}")
 
     async def _think_and_reply(self, cid, tid, td, hist, steps):
+        active = await self.redis.get(f"active_task:{cid}")
+        if not active or active.decode() != str(tid):
+            await self._clear_task_runtime_keys(cid, tid)
+            return
+
         step = steps + 1
         prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT
         ms = await self._get_max_steps(cid)
@@ -878,10 +922,8 @@ class AgentBot:
         await self.redis.setex(f"rate:{self.role}:{cid}", delay * 2, str(time.time()))
         new_steps = await self.redis.incr(f"steps:{cid}:{tid}")
         await self._save_message(cid, tid, self.config["name"], msg)
-        if "[ФИНАЛЬНЫЙ ОТВЕТ]" in response or "[FINAL]" in response:
-            await self.redis.delete(f"active_task:{cid}")
-            await self.redis.delete(f"final_reason:{cid}:{tid}")
-            await self.bot.send_message(cid, "✅ Завершено!")
+        if is_final_response(response):
+            await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.")
             return
 
         if int(new_steps) >= ms:
@@ -934,7 +976,8 @@ class AgentBot:
                     tid = int(val_str.split(":")[0])
                     td = ":".join(val_str.split(":")[1:])
                     active = await self.redis.get(f"active_task:{cid}")
-                    if not active:
+                    if not active or active.decode() != str(tid):
+                        await self._clear_task_runtime_keys(cid, tid)
                         continue
                     ct = await self.redis.get(f"turn:{cid}:{tid}")
                     if ct and ct.decode() != self.role:
