@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     # Loop prevention
     MIN_REPLY_INTERVAL: int = 8
     MAX_DISCUSSION_STEPS: int = 50
+    MIN_FINAL_STEPS: int = 6
     IDLE_TIMEOUT_MINUTES: int = 10
 
     @property
