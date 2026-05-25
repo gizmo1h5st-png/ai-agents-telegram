@@ -18,12 +18,14 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379"
     
     # LLM
-    OPENROUTER_API_KEY: str
+    OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     HUGGINGFACE_API_KEY: str = ""
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
     
     # Models per agent
-    DEFAULT_MODEL: str = "deepseek/deepseek-v4-flash:free"
+    DEFAULT_MODEL: str = "mistral-small-latest"
     COORDINATOR_MODEL: str = ""
     RESEARCHER_MODEL: str = ""
     CRITIC_MODEL: str = ""
@@ -77,7 +79,12 @@ settings = Settings()
 
 
 FREE_MODELS = {
-    # === САМЫЕ СТАБИЛЬНЫЕ (проверены май 2026) ===
+    # === Mistral API напрямую (нужен MISTRAL_API_KEY) ===
+    "mistral-small-direct": {"id": "mistral-small-latest", "name": "🌀 Mistral Small", "desc": "Mistral API direct", "provider": "mistral"},
+    "mistral-nemo-direct": {"id": "open-mistral-nemo", "name": "🌀 Open Mistral Nemo", "desc": "Mistral API direct", "provider": "mistral"},
+    "ministral-8b-direct": {"id": "ministral-8b-latest", "name": "🌀 Ministral 8B", "desc": "Mistral API direct", "provider": "mistral"},
+
+    # === OpenRouter / HuggingFace ===
     "deepseek-r1": {"id": "deepseek/deepseek-r1:free", "name": "🧠 DeepSeek R1", "desc": "Reasoning, логика", "provider": "openrouter"},
     "deepseek-chat": {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "💬 DeepSeek Chat V3", "desc": "Чат, контент", "provider": "openrouter"},
     "deepseek-r1-0528": {"id": "deepseek/deepseek-r1-0528:free", "name": "🧠 DeepSeek R1 0528", "desc": "Новый reasoning", "provider": "openrouter"},
