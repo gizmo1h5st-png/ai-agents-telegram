@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     HUGGINGFACE_API_KEY: str = ""
     MISTRAL_API_KEY: str = ""
     MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
+    GROQ_API_KEY: str = ""
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    CEREBRAS_API_KEY: str = ""
+    CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
+    LLM_REQUEST_TIMEOUT: int = 60
+    SUMMARIZER_MODEL: str = "mistral-small-latest"
     
     # Models per agent
     DEFAULT_MODEL: str = "mistral-small-latest"
@@ -83,6 +89,11 @@ FREE_MODELS = {
     "mistral-small-direct": {"id": "mistral-small-latest", "name": "🌀 Mistral Small", "desc": "Mistral API direct", "provider": "mistral"},
     "mistral-nemo-direct": {"id": "open-mistral-nemo", "name": "🌀 Open Mistral Nemo", "desc": "Mistral API direct", "provider": "mistral"},
     "ministral-8b-direct": {"id": "ministral-8b-latest", "name": "🌀 Ministral 8B", "desc": "Mistral API direct", "provider": "mistral"},
+
+    # === Optional: Groq / Cerebras напрямую (если добавишь ключи) ===
+    "groq-llama8b": {"id": "llama-3.1-8b-instant", "name": "⚡ Groq Llama 8B", "desc": "Groq direct", "provider": "groq"},
+    "groq-llama70b": {"id": "llama-3.3-70b-versatile", "name": "⚡ Groq Llama 70B", "desc": "Groq direct", "provider": "groq"},
+    "cerebras-llama8b": {"id": "llama3.1-8b", "name": "⚡ Cerebras Llama 8B", "desc": "Cerebras direct", "provider": "cerebras"},
 
     # === OpenRouter / HuggingFace ===
     "deepseek-r1": {"id": "deepseek/deepseek-r1:free", "name": "🧠 DeepSeek R1", "desc": "Reasoning, логика", "provider": "openrouter"},
