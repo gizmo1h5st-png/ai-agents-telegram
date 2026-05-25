@@ -332,7 +332,68 @@ class AgentBot:
                 await self._show_steps_picker(cid, cb.message)
             elif c == "delay":
                 await self._show_delay_picker(cid, cb.message)
+            elif c == "status":
+                await self._show_status(cid, cb.message)
             await cb.answer()
+
+        @self.router.callback_query(F.data.startswith("task:"))
+        async def task_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            cid = cb.message.chat.id
+            action = cb.data.split(":", 1)[1]
+
+            if action == "close":
+                try:
+                    await cb.message.delete()
+                except Exception:
+                    pass
+                await cb.answer("Закрыто")
+                return
+
+            if action == "status":
+                await self._show_status(cid, cb.message)
+                await cb.answer()
+                return
+
+            if action == "cleanup":
+                deleted = await self._cleanup_chat_runtime(cid)
+                back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]])
+                await cb.message.edit_text(f"🧹 Очистка выполнена. Удалено ключей: {deleted}", reply_markup=back)
+                await cb.answer("Очищено")
+                return
+
+            active = await self.redis.get(f"active_task:{cid}")
+            if not active:
+                back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]])
+                await cb.message.edit_text("📭 Нет активной задачи.", reply_markup=back)
+                await cb.answer()
+                return
+
+            tid = int(active.decode())
+            if action == "stop":
+                await self._clear_task_runtime_keys(cid, tid)
+                back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]])
+                await cb.message.edit_text("🛑 Задача остановлена. Pending-ходы очищены.", reply_markup=back)
+                await cb.answer("Остановлено")
+                return
+
+            if action == "finalize":
+                task_raw = await self.redis.get(f"task_desc:{cid}:{tid}")
+                td = task_raw.decode() if task_raw else ""
+                await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
+                await self.redis.setex(f"final_reason:{cid}:{tid}", 600, "Пользователь нажал Финализировать сейчас.")
+                await self.redis.setex(f"pending:{cid}:coordinator", 300, f"{tid}:{td}")
+                back = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📊 Статус", callback_data="task:status")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+                ])
+                await cb.message.edit_text("✅ Финализация запущена. Координатор подготовит финальный ответ ближайшим ходом.", reply_markup=back)
+                await cb.answer("Финализирую")
+                return
+
+            await cb.answer("Неизвестное действие", show_alert=True)
 
         @self.router.callback_query(F.data.startswith("gm:"))
         async def gm_cb(cb: CallbackQuery):
@@ -515,6 +576,26 @@ class AgentBot:
             if cmd == "/delay":
                 await self._show_delay_picker(cid)
                 return
+            if cmd == "/status":
+                await self._show_status(cid)
+                return
+            if cmd == "/cleanup":
+                deleted = await self._cleanup_chat_runtime(cid)
+                await self.bot.send_message(cid, f"🧹 Очистка выполнена. Удалено ключей: {deleted}")
+                return
+            if cmd == "/finalize":
+                active = await self.redis.get(f"active_task:{cid}")
+                if not active:
+                    await self.bot.send_message(cid, "📭 Нет активной задачи.")
+                    return
+                tid = int(active.decode())
+                task_raw = await self.redis.get(f"task_desc:{cid}:{tid}")
+                td = task_raw.decode() if task_raw else ""
+                await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
+                await self.redis.setex(f"final_reason:{cid}:{tid}", 600, "Пользователь вызвал /finalize.")
+                await self.redis.setex(f"pending:{cid}:coordinator", 300, f"{tid}:{td}")
+                await self.bot.send_message(cid, "✅ Финализация запущена.")
+                return
             if cmd.startswith("/search"):
                 q = text.replace("/search", "", 1).strip()
                 if q:
@@ -613,6 +694,95 @@ class AgentBot:
             f"{self.config['emoji']} Принял замечание и пересмотрю позицию с учётом вашей правки."
         )
 
+    async def _cleanup_chat_runtime(self, cid):
+        """Грубая очистка runtime-ключей чата: active/pending/turn/locks/rate."""
+        patterns = [
+            f"active_task:{cid}",
+            f"pending:{cid}:*",
+            f"turn:{cid}:*",
+            f"final_reason:{cid}:*",
+            f"llm_fail:{cid}:*",
+            f"finalizing:{cid}:*",
+            f"lock:task:{cid}:*",
+            f"rate:*:{cid}",
+        ]
+        keys = []
+        for pattern in patterns:
+            if "*" in pattern:
+                async for key in self.redis.scan_iter(pattern):
+                    keys.append(key)
+            else:
+                keys.append(pattern)
+        if keys:
+            return await self.redis.delete(*keys)
+        return 0
+
+    async def _acquire_task_lock(self, cid, tid, ttl=180):
+        return await self.redis.set(f"lock:task:{cid}:{tid}", self.role, nx=True, ex=ttl)
+
+    async def _release_task_lock(self, cid, tid):
+        k = f"lock:task:{cid}:{tid}"
+        v = await self.redis.get(k)
+        if v and v.decode() == self.role:
+            await self.redis.delete(k)
+
+    async def _show_status(self, cid, message=None):
+        active = await self.redis.get(f"active_task:{cid}")
+        if not active:
+            text = "📭 <b>Нет активной задачи</b>\n\nМожно начать новую: <code>Задача: описание</code>"
+            btns = [
+                [InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
+            ]
+            await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+            return
+
+        tid = int(active.decode())
+        task_raw = await self.redis.get(f"task_desc:{cid}:{tid}")
+        td = task_raw.decode() if task_raw else ""
+        sr = await self.redis.get(f"steps:{cid}:{tid}")
+        steps = int(sr) if sr else 0
+        ms = await self._get_max_steps(cid)
+        turn = await self.redis.get(f"turn:{cid}:{tid}")
+        turn_s = turn.decode() if turn else "не задан"
+        lock = await self.redis.get(f"lock:task:{cid}:{tid}")
+        lock_s = lock.decode() if lock else "нет"
+        pending = []
+        for role in ROLE_ORDER:
+            if await self.redis.get(f"pending:{cid}:{role}"):
+                pending.append(role)
+        final_reason = await self.redis.get(f"final_reason:{cid}:{tid}")
+        hist = await self._get_history(cid, tid)
+        last = hist[-1]["content"][:350] if hist else "нет сообщений"
+        last_clean = re.sub(r"<[^>]+>", "", last)
+        td_safe = td[:600].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        last_safe = last_clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        models = []
+        for r in ROLE_ORDER:
+            model_short = (await self._get_model_for_role(cid, r)).split("/")[-1].replace(":free", "")[:28]
+            models.append(f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}: <code>{model_short}</code>")
+
+        text = (
+            f"📊 <b>Статус задачи #{tid}</b>\n\n"
+            f"<b>Шаги:</b> {steps}/{ms}\n"
+            f"<b>Текущий ход:</b> <code>{turn_s}</code>\n"
+            f"<b>Lock:</b> <code>{lock_s}</code>\n"
+            f"<b>Pending:</b> <code>{', '.join(pending) if pending else 'нет'}</code>\n"
+            f"<b>Финализация:</b> {'да' if final_reason else 'нет'}\n\n"
+            f"<b>Задача:</b>\n<i>{td_safe}</i>\n\n"
+            f"<b>Модели:</b>\n" + "\n".join(models) + "\n\n"
+            f"<b>Последнее сообщение:</b>\n<code>{last_safe}</code>"
+        )
+        if len(text) > 3900:
+            text = text[:3900] + "..."
+        btns = [
+            [InlineKeyboardButton(text="✅ Финализировать сейчас", callback_data="task:finalize")],
+            [InlineKeyboardButton(text="🛑 Остановить", callback_data="task:stop"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="task:status")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
     async def _show_menu(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
         gm = (gmr.decode() if gmr else settings.DEFAULT_MODEL).split("/")[-1].replace(":free", "")
@@ -624,9 +794,11 @@ class AgentBot:
         btns = [
             [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
             [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
+            [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
             [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
             [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
         ]
 
         text = (
@@ -850,9 +1022,20 @@ class AgentBot:
         await self.redis.delete(f"final_reason:{cid}:{tid}")
         await self.redis.delete(f"llm_fail:{cid}:{tid}")
         await self.redis.delete(f"finalizing:{cid}:{tid}")
+        await self.redis.delete(f"lock:task:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
             await self.redis.delete(f"rate:{role}:{cid}")
+
+    async def _clear_stale_task_keys(self, cid, tid):
+        """Удаляет ключи старой задачи, не трогая active_task и pending новой задачи."""
+        await self.redis.delete(
+            f"turn:{cid}:{tid}",
+            f"final_reason:{cid}:{tid}",
+            f"llm_fail:{cid}:{tid}",
+            f"finalizing:{cid}:{tid}",
+            f"lock:task:{cid}:{tid}",
+        )
 
     async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены."):
         """Единая точка завершения задачи."""
@@ -917,8 +1100,11 @@ class AgentBot:
 
     async def _think_and_reply(self, cid, tid, td, hist, steps):
         active = await self.redis.get(f"active_task:{cid}")
-        if not active or active.decode() != str(tid):
+        if not active:
             await self._clear_task_runtime_keys(cid, tid)
+            return
+        if active.decode() != str(tid):
+            await self._clear_stale_task_keys(cid, tid)
             return
 
         step = steps + 1
@@ -1036,8 +1222,11 @@ class AgentBot:
                     tid = int(val_str.split(":")[0])
                     td = ":".join(val_str.split(":")[1:])
                     active = await self.redis.get(f"active_task:{cid}")
-                    if not active or active.decode() != str(tid):
+                    if not active:
                         await self._clear_task_runtime_keys(cid, tid)
+                        continue
+                    if active.decode() != str(tid):
+                        await self._clear_stale_task_keys(cid, tid)
                         continue
                     ct = await self.redis.get(f"turn:{cid}:{tid}")
                     if ct and ct.decode() != self.role:
@@ -1051,13 +1240,20 @@ class AgentBot:
                     sr = await self.redis.get(f"steps:{cid}:{tid}")
                     steps = int(sr) if sr else 0
                     ms = await self._get_max_steps(cid)
-                    if steps >= ms:
-                        if self.role == "coordinator":
-                            await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
-                        else:
-                            await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+                    got_lock = await self._acquire_task_lock(cid, tid)
+                    if not got_lock:
+                        logger.info(f"Task lock busy: chat={cid}, task={tid}, role={self.role}")
                         continue
-                    await self._think_and_reply(cid, tid, td, history, steps)
+                    try:
+                        if steps >= ms:
+                            if self.role == "coordinator":
+                                await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+                            else:
+                                await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+                            continue
+                        await self._think_and_reply(cid, tid, td, history, steps)
+                    finally:
+                        await self._release_task_lock(cid, tid)
             except Exception as e:
                 logger.error(f"Poll error: {e}")
 
