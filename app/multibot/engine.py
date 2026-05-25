@@ -71,6 +71,26 @@ FINALIZATION_PROMPT = """
 Не упоминай следующего агента и не ставь @username в конце.
 """
 
+STRUCTURED_OUTPUT_PROMPT = """
+
+СТРОГИЙ ФОРМАТ ОТВЕТА:
+Отвечай ТОЛЬКО валидным JSON без Markdown, без ``` и без текста до/после JSON.
+Схема:
+{
+  "message": "текст сообщения, который увидит пользователь",
+  "next_agent": "coordinator|researcher|critic|executor|null",
+  "final": false
+}
+
+Правила JSON:
+- message: твой ответ пользователю и команде.
+- next_agent: следующий агент, если final=false. Нельзя указывать самого себя.
+- final: true только если это финальный ответ по задаче.
+- Если final=true, message ОБЯЗАТЕЛЬНО начинается с [ФИНАЛЬНЫЙ ОТВЕТ], а next_agent должен быть null.
+- Если final=false, next_agent должен быть одним из ДРУГИХ агентов.
+- Не добавляй реплики от имени других агентов.
+"""
+
 
 def normalize_agent_mentions(text):
     """Исправляет старые/ошибочные упоминания перед отправкой и парсингом."""
@@ -131,6 +151,62 @@ def is_final_response(text):
     """Распознаёт финальный ответ в разных форматах, а не только строго [ФИНАЛЬНЫЙ ОТВЕТ]."""
     t = (text or "").strip().lower()
     return any(re.search(pattern, t, flags=re.IGNORECASE | re.MULTILINE) for pattern in FINAL_PATTERNS)
+
+
+def _extract_json_object(raw):
+    """Достаёт JSON-объект из ответа модели, даже если модель обернула его в ```json."""
+    if not raw:
+        return None
+    txt = raw.strip()
+    txt = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.IGNORECASE).strip()
+    txt = re.sub(r"\s*```$", "", txt).strip()
+    if txt.startswith("{") and txt.endswith("}"):
+        return txt
+    m = re.search(r"\{[\s\S]*\}", txt)
+    return m.group(0) if m else None
+
+
+def parse_structured_agent_response(raw, current_role=None):
+    """Возвращает (message, next_agent, final, parsed_ok). Совместим со старым текстовым форматом."""
+    raw = normalize_agent_mentions(raw or "")
+    obj_txt = _extract_json_object(raw)
+    if obj_txt:
+        try:
+            data = json.loads(obj_txt)
+            message = normalize_agent_mentions(str(data.get("message", "")).strip())
+            next_agent = data.get("next_agent", None)
+            final = bool(data.get("final", False))
+
+            if isinstance(next_agent, str):
+                next_agent = next_agent.strip().lower()
+                if next_agent in ("", "none", "null", "-", "нет"):
+                    next_agent = None
+            else:
+                next_agent = None
+
+            if next_agent not in ROLE_ORDER:
+                next_agent = None
+            if next_agent == current_role:
+                next_agent = None
+
+            if not message:
+                message = raw.strip()
+            if is_final_response(message):
+                final = True
+                next_agent = None
+            if final:
+                next_agent = None
+                if not is_final_response(message):
+                    message = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + message
+
+            return message, next_agent, final, True
+        except Exception as e:
+            logger.warning(f"Structured JSON parse failed: {str(e)[:120]}")
+
+    message = raw.strip()
+    final = is_final_response(message)
+    next_agent = None if final else detect_next_agent(message, current_role=current_role)
+    return message, next_agent, final, False
 
 
 def detect_next_agent(text, current_role=None):
@@ -973,7 +1049,7 @@ class AgentBot:
                 {"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]}
                 for m in history[-12:]
             ]
-            prompt = AGENT_BOTS["coordinator"]["prompt"] + CORRECT_USERNAMES_PROMPT + FINALIZATION_PROMPT
+            prompt = AGENT_BOTS["coordinator"]["prompt"] + CORRECT_USERNAMES_PROMPT + FINALIZATION_PROMPT + STRUCTURED_OUTPUT_PROMPT
             model = await self._get_model_for_role(cid, "coordinator")
             response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model, FALLBACK_MODELS)
 
@@ -988,6 +1064,7 @@ class AgentBot:
                     "Рекомендация: использовать этот итог как черновик и при необходимости запустить новую задачу с уточнениями."
                 )
 
+            response, _next_agent, _final, _parsed_ok = parse_structured_agent_response(response, current_role="coordinator")
             response = normalize_agent_mentions(response)
             if not is_final_response(response):
                 response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + response
@@ -1022,7 +1099,7 @@ class AgentBot:
             return
 
         step = steps + 1
-        prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT
+        prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT + STRUCTURED_OUTPUT_PROMPT
         ms = await self._get_max_steps(cid)
 
         if self.role == "coordinator" and step < 5:
@@ -1060,7 +1137,10 @@ class AgentBot:
             return
 
         await self.redis.delete(f"llm_fail:{cid}:{tid}")
+        response, parsed_next_agent, parsed_final, parsed_ok = parse_structured_agent_response(response, current_role=self.role)
         response = normalize_agent_mentions(response)
+        logger.info(f"Structured response: role={self.role}, parsed={parsed_ok}, final={parsed_final}, next={parsed_next_agent}")
+
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
             r = await asyncio.to_thread(search_web, q)
@@ -1082,7 +1162,7 @@ class AgentBot:
         await self.redis.setex(f"rate:{self.role}:{cid}", delay * 2, str(time.time()))
         new_steps = await self.redis.incr(f"steps:{cid}:{tid}")
         await self._save_message(cid, tid, self.config["name"], msg)
-        if is_final_response(response):
+        if parsed_final or is_final_response(response):
             await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.")
             return
 
@@ -1093,8 +1173,13 @@ class AgentBot:
                 await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
             return
 
-        na = detect_next_agent(response, current_role=self.role)
+        na = parsed_next_agent
         if not na:
+            na = detect_next_agent(response, current_role=self.role)
+        if not na:
+            idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
+            na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+        if na == self.role:
             idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
             na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
         await self.redis.setex(f"turn:{cid}:{tid}", 600, na)
