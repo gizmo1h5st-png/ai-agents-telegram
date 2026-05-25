@@ -103,20 +103,8 @@ class AgentBot:
         @self.router.message(F.text)
         async def handle_message(message: Message):
             await self._process_message(message)
-        
-        @self.router.callback_query(F.data.startswith("gm:"))
-        async def global_model_cb(callback: CallbackQuery):
-            await self._set_global_model(callback)
-        
-        @self.router.callback_query(F.data.startswith("pickagent:"))
-        async def pick_agent_cb(callback: CallbackQuery):
-            await self._pick_agent_for_model(callback)
-        
-        @self.router.callback_query(F.data.startswith("am:"))
-        async def agent_model_cb(callback: CallbackQuery):
-            await self._set_agent_model(callback)
 
-                @self.router.callback_query(F.data.startswith("cmd:"))
+        @self.router.callback_query(F.data.startswith("cmd:"))
         async def cmd_cb(callback: CallbackQuery):
             if self.role != "coordinator":
                 await callback.answer()
@@ -136,15 +124,28 @@ class AgentBot:
             elif cmd == "delay":
                 await self._show_delay_picker(chat_id)
             await callback.answer()
+
+        @self.router.callback_query(F.data.startswith("gm:"))
+        async def global_model_cb(callback: CallbackQuery):
+            await self._set_global_model(callback)
+
+        @self.router.callback_query(F.data.startswith("pickagent:"))
+        async def pick_agent_cb(callback: CallbackQuery):
+            await self._pick_agent_for_model(callback)
+
+        @self.router.callback_query(F.data.startswith("am:"))
+        async def agent_model_cb(callback: CallbackQuery):
+            await self._set_agent_model(callback)
+
         @self.router.callback_query(F.data == "resetmodels")
         async def reset_cb(callback: CallbackQuery):
             chat_id = callback.message.chat.id
             await self.redis.delete(f"global_model:{chat_id}")
             for r in ROLE_ORDER:
                 await self.redis.delete(f"agent_model:{chat_id}:{r}")
-            await callback.message.edit_text("🔄 Все модели сброшены на default.")
+            await callback.message.edit_text("🔄 Все модели сброшены.")
             await callback.answer("Сброшено")
-        
+
         @self.router.callback_query(F.data.startswith("setsteps:"))
         async def set_steps_cb(callback: CallbackQuery):
             val = int(callback.data.split(":")[1])
@@ -152,7 +153,7 @@ class AgentBot:
             await self.redis.setex(f"max_steps:{chat_id}", 86400, str(val))
             await callback.message.edit_text(f"✅ Макс. шагов: {val}")
             await callback.answer()
-        
+
         @self.router.callback_query(F.data.startswith("setdelay:"))
         async def set_delay_cb(callback: CallbackQuery):
             val = int(callback.data.split(":")[1])
