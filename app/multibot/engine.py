@@ -10,6 +10,7 @@ import redis.asyncio as aioredis
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, URLInputFile
 from app.config import settings, AGENT_BOTS, FREE_MODELS
+from app.llm.router import call_llm_sync, get_provider_for_model, get_llm_router_status
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "critic", "executor"]
@@ -158,121 +159,6 @@ def detect_next_agent(text, current_role=None):
                 if re.search(pattern, t):
                     return role
 
-    return None
-
-
-def get_provider_for_model(model_id):
-    for m in FREE_MODELS.values():
-        if m["id"] == model_id:
-            return m.get("provider", "openrouter")
-
-    # Прямые модели Mistral API.
-    if model_id in ("mistral-small-latest", "open-mistral-nemo", "ministral-8b-latest"):
-        return "mistral"
-
-    # HF модели обычно без :free и с org/model.
-    if "/" in model_id and ":free" not in model_id:
-        if not model_id.startswith(("openai/", "deepseek/", "meta-llama/", "mistralai/", "google/", "qwen/", "zhipu-ai/", "nousresearch/", "nvidia/", "moonshotai/")):
-            return "huggingface"
-
-    return "openrouter"
-
-
-def build_llm_request(provider, model_id):
-    """Возвращает url/headers для провайдера. Не логирует ключи."""
-    if provider == "mistral":
-        if not settings.MISTRAL_API_KEY:
-            return None, None
-        return (
-            f"{settings.MISTRAL_BASE_URL}/chat/completions",
-            {"Authorization": f"Bearer {settings.MISTRAL_API_KEY}", "Content-Type": "application/json"},
-        )
-
-    if provider == "huggingface":
-        if not settings.HUGGINGFACE_API_KEY:
-            return None, None
-        return (
-            "https://router.huggingface.co/v1/chat/completions",
-            {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Content-Type": "application/json"},
-        )
-
-    # OpenRouter fallback.
-    if not settings.OPENROUTER_API_KEY:
-        return None, None
-    return (
-        f"{settings.OPENROUTER_BASE_URL}/chat/completions",
-        {
-            "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/gizmo1h5st-png/ai-agents-telegram",
-            "X-Title": "AI Agents Telegram",
-        },
-    )
-
-
-def call_llm_sync(system_prompt, messages, task, model):
-    # Убираем дубли, сохраняя порядок.
-    models_to_try = []
-    for m in [model] + FALLBACK_MODELS:
-        if m and m not in models_to_try:
-            models_to_try.append(m)
-
-    full_messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"ЗАДАЧА: {task}"},
-        *messages,
-    ]
-
-    last_error = None
-    for try_model in models_to_try[:8]:
-        provider = get_provider_for_model(try_model)
-        url, headers = build_llm_request(provider, try_model)
-        if not url:
-            continue
-
-        payload = {
-            "model": try_model,
-            "messages": full_messages,
-            "max_tokens": settings.MAX_TOKENS_PER_REQUEST,
-            "temperature": 0.7,
-        }
-
-        try:
-            with httpx.Client(timeout=60) as client:
-                resp = client.post(url, headers=headers, json=payload)
-
-                if resp.status_code in (401, 403):
-                    logger.warning(f"LLM auth error: provider={provider}, model={try_model}, status={resp.status_code}")
-                    last_error = f"auth {provider} {resp.status_code}"
-                    continue
-
-                if resp.status_code in (429, 402, 404):
-                    logger.warning(f"LLM fallback: provider={provider}, model={try_model}, status={resp.status_code}")
-                    last_error = f"fallback {provider} {resp.status_code}"
-                    time.sleep(1.5)
-                    continue
-
-                if resp.status_code != 200:
-                    logger.warning(f"LLM error: provider={provider}, model={try_model}, status={resp.status_code}, body={resp.text[:200]}")
-                    last_error = f"error {provider} {resp.status_code}"
-                    continue
-
-                data = resp.json()
-                if "choices" not in data or not data["choices"]:
-                    last_error = f"empty choices {provider}"
-                    continue
-
-                content = data["choices"][0].get("message", {}).get("content")
-                if content:
-                    logger.info(f"LLM success: provider={provider}, model={try_model}")
-                    return content.strip()
-
-        except Exception as e:
-            logger.warning(f"LLM exception: provider={provider}, model={try_model}, error={str(e)[:120]}")
-            last_error = str(e)[:120]
-            continue
-
-    logger.error(f"All LLM providers failed. Last error: {last_error}")
     return None
 
 
@@ -889,16 +775,44 @@ class AgentBot:
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _show_providers_help(self, cid, message=None):
-        text = (
-            "🧩 <b>Бесплатные API-провайдеры</b>\n\n"
-            "Полного легального безлимита у hosted LLM API почти не бывает. Реальный вариант — несколько permanent free tiers + fallback.\n\n"
-            "<b>Сейчас подключено в коде:</b>\n"
-            "1. <b>Mistral API direct</b> — основной провайдер через MISTRAL_API_KEY.\n"
-            "2. <b>OpenRouter</b> — fallback, если есть OPENROUTER_API_KEY.\n"
-            "3. <b>HuggingFace</b> — fallback, если есть HUGGINGFACE_API_KEY.\n\n"
-            "Для бесплатного режима ставь 8–12 шагов, задержку 8–15с и Mistral Small / Nemo для агентов."
+        st = get_llm_router_status()
+        lines = [
+            "🧩 <b>LLM Provider Router</b>",
+            "",
+            "Порядок fallback: выбранная модель → Mistral → OpenRouter/HF/Groq/Cerebras, если есть ключи.",
+            "",
+            f"<b>Cache:</b> {st['cache_size']} items, TTL {st['cache_ttl_seconds']}s",
+            "",
+            "<b>Провайдеры:</b>",
+        ]
+        for name, info in st["providers"].items():
+            icon = "🟢" if info["configured"] and info["blocked_seconds"] == 0 else ("🟡" if info["configured"] else "⚪")
+            block = f" blocked {info['blocked_seconds']}s" if info["blocked_seconds"] else ""
+            stats = info.get("stats", {})
+            lines.append(
+                f"{icon} <b>{name}</b>: key=<code>{info['key']}</code>{block} "
+                f"ok={stats.get('success',0)} fail={stats.get('fail',0)} skip={stats.get('skip',0)}"
+            )
+            if info.get("last_error"):
+                lines.append(f"   <code>{str(info['last_error'])[:120]}</code>")
+        lines += [
+            "",
+            "<b>Команды:</b>",
+            "• <code>/status</code> — задача и lock",
+            "• <code>/cleanup</code> — очистить Redis runtime",
+            "• <code>/finalize</code> — финальный ответ сейчас",
+        ]
+        text = "\n".join(lines)
+        await self._send_or_edit(
+            cid,
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="cmd:providers")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
+            ]),
+            message=message,
         )
-        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="cmd:menu")]]), message=message)
 
     async def _show_model_picker(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
@@ -1061,7 +975,7 @@ class AgentBot:
             ]
             prompt = AGENT_BOTS["coordinator"]["prompt"] + CORRECT_USERNAMES_PROMPT + FINALIZATION_PROMPT
             model = await self._get_model_for_role(cid, "coordinator")
-            response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model)
+            response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model, FALLBACK_MODELS)
 
             if not response:
                 short_history = "\n".join([m.get("content", "")[:500] for m in history[-8:]])
@@ -1124,7 +1038,7 @@ class AgentBot:
 
         llm_msgs = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in hist[-10:]]
         model = await self._get_model(cid)
-        response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model)
+        response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model, FALLBACK_MODELS)
         if not response:
             fail_key = f"llm_fail:{cid}:{tid}"
             fails = await self.redis.incr(fail_key)
