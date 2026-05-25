@@ -312,24 +312,26 @@ class AgentBot:
                 return
             cid = cb.message.chat.id
             c = cb.data.split(":")[1]
-            if c == "model":
-                await self._show_model_picker(cid)
+            if c == "menu":
+                await self._show_menu(cid, cb.message)
+            elif c == "model":
+                await self._show_model_picker(cid, cb.message)
             elif c == "agentmodel":
-                await self._show_agent_model_picker(cid)
+                await self._show_agent_model_picker(cid, cb.message)
             elif c == "models":
-                await self._show_models_list(cid)
+                await self._show_models_list(cid, cb.message)
             elif c == "config":
-                await self._show_config(cid)
+                await self._show_config(cid, cb.message)
             elif c == "agents":
-                await self._show_agents_dashboard(cid)
+                await self._show_agents_dashboard(cid, cb.message)
             elif c == "providers":
-                await self._show_providers_help(cid)
+                await self._show_providers_help(cid, cb.message)
             elif c == "help":
-                await self._show_help(cid)
+                await self._show_help(cid, cb.message)
             elif c == "steps":
-                await self._show_steps_picker(cid)
+                await self._show_steps_picker(cid, cb.message)
             elif c == "delay":
-                await self._show_delay_picker(cid)
+                await self._show_delay_picker(cid, cb.message)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("gm:"))
@@ -340,7 +342,11 @@ class AgentBot:
                 return
             m = FREE_MODELS[k]
             await self.redis.setex(f"global_model:{cb.message.chat.id}", 86400, m["id"])
-            await cb.message.edit_text(f"✅ {m['name']}\n{m['id']}")
+            back = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к моделям", callback_data="cmd:model")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ])
+            await cb.message.edit_text(f"✅ {m['name']}\n<code>{m['id']}</code>", parse_mode="HTML", reply_markup=back)
             await cb.answer(m["name"])
 
         @self.router.callback_query(F.data.startswith("agentcfg:"))
@@ -349,7 +355,7 @@ class AgentBot:
             if r not in AGENT_BOTS:
                 await cb.answer("❌")
                 return
-            await self._show_agent_card(cb.message.chat.id, r)
+            await self._show_agent_card(cb.message.chat.id, r, cb.message)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("pickagent:"))
@@ -367,7 +373,9 @@ class AgentBot:
                     row = []
             if row:
                 btns.append(row)
-            await cb.message.edit_text(f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+            btns.append([InlineKeyboardButton(text="⬅️ Назад к агенту", callback_data=f"agentcfg:{r}")])
+            btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+            await cb.message.edit_text(f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']} — выбери модель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("am:"))
@@ -378,7 +386,16 @@ class AgentBot:
                 return
             m = FREE_MODELS[p[2]]
             await self.redis.setex(f"agent_model:{cb.message.chat.id}:{p[1]}", 86400, m["id"])
-            await cb.message.edit_text(f"✅ {AGENT_BOTS[p[1]]['emoji']} {AGENT_BOTS[p[1]]['name']}: {m['name']}")
+            back = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к агенту", callback_data=f"agentcfg:{p[1]}")],
+                [InlineKeyboardButton(text="🎛 Все агенты", callback_data="cmd:agentmodel")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ])
+            await cb.message.edit_text(
+                f"✅ {AGENT_BOTS[p[1]]['emoji']} {AGENT_BOTS[p[1]]['name']}: {m['name']}\n<code>{m['id']}</code>",
+                parse_mode="HTML",
+                reply_markup=back,
+            )
             await cb.answer()
 
         @self.router.callback_query(F.data == "resetmodels")
@@ -387,21 +404,30 @@ class AgentBot:
             await self.redis.delete(f"global_model:{cid}")
             for r in ROLE_ORDER:
                 await self.redis.delete(f"agent_model:{cid}:{r}")
-            await cb.message.edit_text("🔄 Сброшено.")
+            back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]])
+            await cb.message.edit_text("🔄 Сброшено.", reply_markup=back)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("setsteps:"))
         async def ss_cb(cb: CallbackQuery):
             v = int(cb.data.split(":")[1])
             await self.redis.setex(f"max_steps:{cb.message.chat.id}", 86400, str(v))
-            await cb.message.edit_text(f"✅ Шагов: {v}")
+            back = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к шагам", callback_data="cmd:steps")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ])
+            await cb.message.edit_text(f"✅ Шагов: {v}", reply_markup=back)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("setdelay:"))
         async def sd_cb(cb: CallbackQuery):
             v = int(cb.data.split(":")[1])
             await self.redis.setex(f"delay:{cb.message.chat.id}", 86400, str(v))
-            await cb.message.edit_text(f"✅ Задержка: {v}с")
+            back = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к задержке", callback_data="cmd:delay")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ])
+            await cb.message.edit_text(f"✅ Задержка: {v}с", reply_markup=back)
             await cb.answer()
 
     async def _get_my_id(self):
@@ -428,6 +454,24 @@ class AgentBot:
     async def _get_max_steps(self, cid):
         v = await self.redis.get(f"max_steps:{cid}")
         return int(v) if v else settings.MAX_DISCUSSION_STEPS
+
+    async def _send_or_edit(self, cid, text, reply_markup=None, parse_mode="HTML", message=None):
+        """Редактирует текущее меню по inline-кнопке, а не плодит новые сообщения."""
+        if message:
+            try:
+                await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                return
+            except Exception as e:
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    return
+                logger.warning(f"Menu edit failed, send new: {str(e)[:120]}")
+        await self.bot.send_message(cid, text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+    async def _back_markup(self, *rows):
+        buttons = list(rows)
+        buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     async def _process_message(self, message: Message):
         cid = message.chat.id
@@ -569,7 +613,7 @@ class AgentBot:
             f"{self.config['emoji']} Принял замечание и пересмотрю позицию с учётом вашей правки."
         )
 
-    async def _show_menu(self, cid):
+    async def _show_menu(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
         gm = (gmr.decode() if gmr else settings.DEFAULT_MODEL).split("/")[-1].replace(":free", "")
         ms = await self._get_max_steps(cid)
@@ -601,9 +645,9 @@ class AgentBot:
             "🧐 <code>@criticaibot_bot</code>\n"
             "⚡ <code>@executorai_ai_bot</code>"
         )
-        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_agents_dashboard(self, cid):
+    async def _show_agents_dashboard(self, cid, message=None):
         btns = []
         for r in ROLE_ORDER:
             cfg = AGENT_BOTS[r]
@@ -611,15 +655,16 @@ class AgentBot:
             short = model.split("/")[-1].replace(":free", "")[:22]
             btns.append([InlineKeyboardButton(text=f"{cfg['emoji']} {cfg['name']} · {short}", callback_data=f"agentcfg:{r}")])
         btns.append([InlineKeyboardButton(text="🎛 Быстрая смена моделей", callback_data="cmd:agentmodel")])
-        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:help")])
-        await self.bot.send_message(
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(
             cid,
             "👥 <b>Настройки агентов</b>\n\nВыбери агента, чтобы посмотреть роль, username и сменить модель:",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns)
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+            message=message,
         )
 
-    async def _show_agent_card(self, cid, role):
+    async def _show_agent_card(self, cid, role, message=None):
         cfg = AGENT_BOTS[role]
         model = await self._get_model_for_role(cid, role)
         username = {
@@ -636,7 +681,7 @@ class AgentBot:
         }.get(role, "")
         btns = [
             [InlineKeyboardButton(text="🤖 Сменить модель", callback_data=f"pickagent:{role}")],
-            [InlineKeyboardButton(text="👥 Все агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🏠 Помощь", callback_data="cmd:help")],
+            [InlineKeyboardButton(text="⬅️ Назад к агентам", callback_data="cmd:agents"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
         ]
         text = (
             f"{cfg['emoji']} <b>{cfg['name']}</b>\n\n"
@@ -648,9 +693,9 @@ class AgentBot:
             f"2. Напиши: <code>{username} твоё замечание</code>\n\n"
             "Агент получит ближайший ход и обязан пересмотреть позицию."
         )
-        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_help(self, cid):
+    async def _show_help(self, cid, message=None):
         text = (
             "❓ <b>Как пользоваться AI Agents Team</b>\n\n"
             "<b>1. Запуск задачи</b>\n"
@@ -665,10 +710,13 @@ class AgentBot:
             "<code>/agentmodel</code> — модель для каждого агента\n\n"
             "Совет: для бесплатных API ставь 8–12 шагов и задержку 8–15 секунд."
         )
-        btns = [[InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")]]
-        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        btns = [
+            [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_providers_help(self, cid):
+    async def _show_providers_help(self, cid, message=None):
         text = (
             "🧩 <b>Бесплатные API-провайдеры</b>\n\n"
             "Полного легального безлимита у hosted LLM API почти не бывает. Реальный вариант — несколько permanent free tiers + fallback.\n\n"
@@ -678,9 +726,9 @@ class AgentBot:
             "3. <b>HuggingFace</b> — fallback, если есть HUGGINGFACE_API_KEY.\n\n"
             "Для бесплатного режима ставь 8–12 шагов, задержку 8–15с и Mistral Small / Nemo для агентов."
         )
-        await self.bot.send_message(cid, text, parse_mode="HTML")
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="cmd:menu")]]), message=message)
 
-    async def _show_model_picker(self, cid):
+    async def _show_model_picker(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
         cur = gmr.decode() if gmr else settings.DEFAULT_MODEL
         btns, row = [], []
@@ -692,9 +740,10 @@ class AgentBot:
                 row = []
         if row:
             btns.append(row)
-        await self.bot.send_message(cid, "🤖 Модель:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(cid, "🤖 <b>Общая модель:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_agent_model_picker(self, cid):
+    async def _show_agent_model_picker(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
         df = gmr.decode() if gmr else settings.DEFAULT_MODEL
         btns = []
@@ -703,9 +752,10 @@ class AgentBot:
             cur = (am.decode() if am else df).split("/")[-1].replace(":free", "")[:18]
             btns.append([InlineKeyboardButton(text=f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}: {cur}", callback_data=f"pickagent:{r}")])
         btns.append([InlineKeyboardButton(text="🔄 Сброс", callback_data="resetmodels")])
-        await self.bot.send_message(cid, "🎛 Агенты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(cid, "🎛 <b>Модели агентов:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_models_list(self, cid):
+    async def _show_models_list(self, cid, message=None):
         t = "📋 <b>Модели:</b>\n"
         for provider_name, provider_key in [("Mistral API", "mistral"), ("OpenRouter", "openrouter"), ("HuggingFace", "huggingface")]:
             t += f"\n<b>{provider_name}:</b>\n"
@@ -716,9 +766,13 @@ class AgentBot:
                     found = True
             if not found:
                 t += "• нет моделей\n"
-        await self.bot.send_message(cid, t, parse_mode="HTML")
+        await self._send_or_edit(
+            cid, t, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]),
+            message=message,
+        )
 
-    async def _show_config(self, cid):
+    async def _show_config(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
         gm = (gmr.decode() if gmr else settings.DEFAULT_MODEL).split("/")[-1].replace(":free", "")
         ms = await self._get_max_steps(cid)
@@ -729,9 +783,13 @@ class AgentBot:
             e = AGENT_BOTS[r]["emoji"]
             n = AGENT_BOTS[r]["name"]
             t += f"{e} {n}: <code>{am.decode().split('/')[-1] if am else '(общая)'}</code>\n"
-        await self.bot.send_message(cid, t, parse_mode="HTML")
+        await self._send_or_edit(
+            cid, t, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]),
+            message=message,
+        )
 
-    async def _show_steps_picker(self, cid):
+    async def _show_steps_picker(self, cid, message=None):
         cur = await self._get_max_steps(cid)
         btns, row = [], []
         for v in [10, 20, 30, 50, 75, 100]:
@@ -742,9 +800,10 @@ class AgentBot:
                 row = []
         if row:
             btns.append(row)
-        await self.bot.send_message(cid, f"📊 Шагов ({cur}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(cid, f"📊 <b>Шагов ({cur}):</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
-    async def _show_delay_picker(self, cid):
+    async def _show_delay_picker(self, cid, message=None):
         cur = await self._get_delay(cid)
         btns, row = [], []
         for v in [3, 5, 8, 10, 15, 20]:
@@ -755,7 +814,8 @@ class AgentBot:
                 row = []
         if row:
             btns.append(row)
-        await self.bot.send_message(cid, f"⏱ Задержка ({cur}с):", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(cid, f"⏱ <b>Задержка ({cur}с):</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _start_discussion(self, message: Message):
         cid = message.chat.id
