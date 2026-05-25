@@ -491,15 +491,10 @@ class AgentBot:
         if not na:
             idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
             na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
-        await self.redis.setex(f"turn:{chat_id}:{task_id}", 600, na)
+              await self.redis.setex(f"turn:{chat_id}:{task_id}", 600, na)
         await asyncio.sleep(delay)
-        # Триггерим следующего бота — отправляем невидимое сообщение
-        try:
-            trigger_msg = await self.bot.send_message(chat_id, f"➡️ @{na}, твой ход")
-            await asyncio.sleep(1)
-            await self.bot.delete_message(chat_id, trigger_msg.message_id)
-        except:
-            pass
+        # Пушим задачу в очередь следующего бота
+        await self.redis.setex(f"pending:{chat_id}:{na}", 300, f"{task_id}:{task_desc}")
 
     async def _get_history(self, chat_id, task_id):
         key = f"history:{chat_id}:{task_id}"
