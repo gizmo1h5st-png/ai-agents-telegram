@@ -13,7 +13,18 @@ from app.config import settings, AGENT_BOTS, FREE_MODELS
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "critic", "executor"]
-FALLBACK_MODELS = ["deepseek/deepseek-chat-v3-0324:free", "meta-llama/llama-4-scout:free", "mistralai/mistral-small-3.1-24b-instruct:free", "google/gemma-3-27b-it:free", "deepseek-ai/DeepSeek-R1"]
+FALLBACK_MODELS = [
+    # Сначала Mistral напрямую — у пользователя есть MISTRAL_API_KEY.
+    "mistral-small-latest",
+    "open-mistral-nemo",
+    "ministral-8b-latest",
+    # Затем бесплатные OpenRouter/HuggingFace fallback.
+    "deepseek/deepseek-chat-v3-0324:free",
+    "meta-llama/llama-4-scout:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "deepseek-ai/DeepSeek-R1",
+]
 
 
 AGENT_MENTIONS = {
@@ -132,42 +143,118 @@ def detect_next_agent(text, current_role=None):
     return None
 
 
+def get_provider_for_model(model_id):
+    for m in FREE_MODELS.values():
+        if m["id"] == model_id:
+            return m.get("provider", "openrouter")
+
+    # Прямые модели Mistral API.
+    if model_id in ("mistral-small-latest", "open-mistral-nemo", "ministral-8b-latest"):
+        return "mistral"
+
+    # HF модели обычно без :free и с org/model.
+    if "/" in model_id and ":free" not in model_id:
+        if not model_id.startswith(("openai/", "deepseek/", "meta-llama/", "mistralai/", "google/", "qwen/", "zhipu-ai/", "nousresearch/", "nvidia/", "moonshotai/")):
+            return "huggingface"
+
+    return "openrouter"
+
+
+def build_llm_request(provider, model_id):
+    """Возвращает url/headers для провайдера. Не логирует ключи."""
+    if provider == "mistral":
+        if not settings.MISTRAL_API_KEY:
+            return None, None
+        return (
+            f"{settings.MISTRAL_BASE_URL}/chat/completions",
+            {"Authorization": f"Bearer {settings.MISTRAL_API_KEY}", "Content-Type": "application/json"},
+        )
+
+    if provider == "huggingface":
+        if not settings.HUGGINGFACE_API_KEY:
+            return None, None
+        return (
+            "https://router.huggingface.co/v1/chat/completions",
+            {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Content-Type": "application/json"},
+        )
+
+    # OpenRouter fallback.
+    if not settings.OPENROUTER_API_KEY:
+        return None, None
+    return (
+        f"{settings.OPENROUTER_BASE_URL}/chat/completions",
+        {
+            "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/gizmo1h5st-png/ai-agents-telegram",
+            "X-Title": "AI Agents Telegram",
+        },
+    )
+
+
 def call_llm_sync(system_prompt, messages, task, model):
-    models_to_try = [model] + [m for m in FALLBACK_MODELS if m != model]
-    for try_model in models_to_try[:5]:
-        provider = "openrouter"
-        for m in FREE_MODELS.values():
-            if m["id"] == try_model:
-                provider = m.get("provider", "openrouter")
-                break
-        if provider == "openrouter" and "/" in try_model and ":free" not in try_model:
-            if not try_model.startswith("openai/") and not try_model.startswith("deepseek/"):
-                provider = "huggingface"
-        full_messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"ЗАДАЧА: {task}"}, *messages]
-        if provider == "huggingface":
-            if not settings.HUGGINGFACE_API_KEY:
-                continue
-            url = "https://router.huggingface.co/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}", "Content-Type": "application/json"}
-        else:
-            url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
-            headers = {"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    # Убираем дубли, сохраняя порядок.
+    models_to_try = []
+    for m in [model] + FALLBACK_MODELS:
+        if m and m not in models_to_try:
+            models_to_try.append(m)
+
+    full_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"ЗАДАЧА: {task}"},
+        *messages,
+    ]
+
+    last_error = None
+    for try_model in models_to_try[:8]:
+        provider = get_provider_for_model(try_model)
+        url, headers = build_llm_request(provider, try_model)
+        if not url:
+            continue
+
+        payload = {
+            "model": try_model,
+            "messages": full_messages,
+            "max_tokens": settings.MAX_TOKENS_PER_REQUEST,
+            "temperature": 0.7,
+        }
+
         try:
             with httpx.Client(timeout=60) as client:
-                resp = client.post(url, headers=headers, json={"model": try_model, "messages": full_messages, "max_tokens": 1024, "temperature": 0.7})
+                resp = client.post(url, headers=headers, json=payload)
+
+                if resp.status_code in (401, 403):
+                    logger.warning(f"LLM auth error: provider={provider}, model={try_model}, status={resp.status_code}")
+                    last_error = f"auth {provider} {resp.status_code}"
+                    continue
+
                 if resp.status_code in (429, 402, 404):
-                    time.sleep(2)
+                    logger.warning(f"LLM fallback: provider={provider}, model={try_model}, status={resp.status_code}")
+                    last_error = f"fallback {provider} {resp.status_code}"
+                    time.sleep(1.5)
                     continue
+
                 if resp.status_code != 200:
+                    logger.warning(f"LLM error: provider={provider}, model={try_model}, status={resp.status_code}, body={resp.text[:200]}")
+                    last_error = f"error {provider} {resp.status_code}"
                     continue
+
                 data = resp.json()
                 if "choices" not in data or not data["choices"]:
+                    last_error = f"empty choices {provider}"
                     continue
+
                 content = data["choices"][0].get("message", {}).get("content")
                 if content:
+                    logger.info(f"LLM success: provider={provider}, model={try_model}")
                     return content.strip()
-        except:
+
+        except Exception as e:
+            logger.warning(f"LLM exception: provider={provider}, model={try_model}, error={str(e)[:120]}")
+            last_error = str(e)[:120]
             continue
+
+    logger.error(f"All LLM providers failed. Last error: {last_error}")
     return None
 
 
@@ -215,6 +302,12 @@ class AgentBot:
                 await self._show_models_list(cid)
             elif c == "config":
                 await self._show_config(cid)
+            elif c == "agents":
+                await self._show_agents_dashboard(cid)
+            elif c == "providers":
+                await self._show_providers_help(cid)
+            elif c == "help":
+                await self._show_help(cid)
             elif c == "steps":
                 await self._show_steps_picker(cid)
             elif c == "delay":
@@ -231,6 +324,15 @@ class AgentBot:
             await self.redis.setex(f"global_model:{cb.message.chat.id}", 86400, m["id"])
             await cb.message.edit_text(f"✅ {m['name']}\n{m['id']}")
             await cb.answer(m["name"])
+
+        @self.router.callback_query(F.data.startswith("agentcfg:"))
+        async def agentcfg_cb(cb: CallbackQuery):
+            r = cb.data.split(":", 1)[1]
+            if r not in AGENT_BOTS:
+                await cb.answer("❌")
+                return
+            await self._show_agent_card(cb.message.chat.id, r)
+            await cb.answer()
 
         @self.router.callback_query(F.data.startswith("pickagent:"))
         async def pa_cb(cb: CallbackQuery):
@@ -450,13 +552,111 @@ class AgentBot:
         gm = (gmr.decode() if gmr else settings.DEFAULT_MODEL).split("/")[-1].replace(":free", "")
         ms = await self._get_max_steps(cid)
         dl = await self._get_delay(cid)
+        active = await self.redis.get(f"active_task:{cid}")
+        status = "🟢 активна" if active else "⚪ нет активной задачи"
+
         btns = [
-            [InlineKeyboardButton(text="🤖 Модель", callback_data="cmd:model"), InlineKeyboardButton(text="🎛 Агенты", callback_data="cmd:agentmodel")],
-            [InlineKeyboardButton(text="📋 Список", callback_data="cmd:models"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
+            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
-            [InlineKeyboardButton(text="🔄 Сброс", callback_data="resetmodels")],
+            [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
         ]
-        await self.bot.send_message(cid, f"🎯 <b>AI Agents Team</b>\n\n🤖 <code>{gm}</code>\n📊 {ms} шагов\n⏱ {dl}с\n\n<b>Задачи:</b> <code>Задача: описание</code>\n<b>Замечания:</b> ответь на сообщение бота или напиши <code>@Researcher1_ai_bot текст</code>\n/stop\n/search запрос\n/image описание", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+        text = (
+            "<b>🚀 AI Agents Team</b>\n"
+            "<i>4 Telegram-агента: координатор, исследователь, критик, исполнитель.</i>\n\n"
+            f"<b>Состояние:</b> {status}\n"
+            f"<b>Общая модель:</b> <code>{gm}</code>\n"
+            f"<b>Лимит:</b> {ms} шагов · <b>Пауза:</b> {dl}с\n\n"
+            "<b>Быстрый старт:</b>\n"
+            "• <code>Задача: опиши задачу</code> — начать обсуждение\n"
+            "• <code>/stop</code> — остановить активную задачу\n"
+            "• Замечание агенту: ответь reply на сообщение бота или напиши <code>@Researcher1_ai_bot текст</code>\n\n"
+            "<b>Правильные usernames:</b>\n"
+            "🎯 <code>@coordintor_ai_bot</code>\n"
+            "🔍 <code>@Researcher1_ai_bot</code>\n"
+            "🧐 <code>@criticaibot_bot</code>\n"
+            "⚡ <code>@executorai_ai_bot</code>"
+        )
+        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+    async def _show_agents_dashboard(self, cid):
+        btns = []
+        for r in ROLE_ORDER:
+            cfg = AGENT_BOTS[r]
+            model = await self._get_model_for_role(cid, r)
+            short = model.split("/")[-1].replace(":free", "")[:22]
+            btns.append([InlineKeyboardButton(text=f"{cfg['emoji']} {cfg['name']} · {short}", callback_data=f"agentcfg:{r}")])
+        btns.append([InlineKeyboardButton(text="🎛 Быстрая смена моделей", callback_data="cmd:agentmodel")])
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:help")])
+        await self.bot.send_message(
+            cid,
+            "👥 <b>Настройки агентов</b>\n\nВыбери агента, чтобы посмотреть роль, username и сменить модель:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns)
+        )
+
+    async def _show_agent_card(self, cid, role):
+        cfg = AGENT_BOTS[role]
+        model = await self._get_model_for_role(cid, role)
+        username = {
+            "coordinator": "@coordintor_ai_bot",
+            "researcher": "@Researcher1_ai_bot",
+            "critic": "@criticaibot_bot",
+            "executor": "@executorai_ai_bot",
+        }.get(role, "")
+        desc = {
+            "coordinator": "управляет ходом обсуждения и финализирует ответ",
+            "researcher": "ищет факты, делает краткий анализ, учитывает ваши поправки",
+            "critic": "проверяет логику, риски и слабые места",
+            "executor": "делает практический результат: код, текст, план, расчёты",
+        }.get(role, "")
+        btns = [
+            [InlineKeyboardButton(text="🤖 Сменить модель", callback_data=f"pickagent:{role}")],
+            [InlineKeyboardButton(text="👥 Все агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🏠 Помощь", callback_data="cmd:help")],
+        ]
+        text = (
+            f"{cfg['emoji']} <b>{cfg['name']}</b>\n\n"
+            f"<b>Username:</b> <code>{username}</code>\n"
+            f"<b>Роль:</b> {desc}\n"
+            f"<b>Модель:</b> <code>{model}</code>\n\n"
+            "<b>Как дать замечание:</b>\n"
+            "1. Ответь reply на сообщение этого бота; или\n"
+            f"2. Напиши: <code>{username} твоё замечание</code>\n\n"
+            "Агент получит ближайший ход и обязан пересмотреть позицию."
+        )
+        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+    async def _show_help(self, cid):
+        text = (
+            "❓ <b>Как пользоваться AI Agents Team</b>\n\n"
+            "<b>1. Запуск задачи</b>\n"
+            "<code>Задача: придумай план запуска Telegram SaaS</code>\n\n"
+            "<b>2. Вмешательство в обсуждение</b>\n"
+            "Если не согласен с агентом — ответь reply на его сообщение или напиши username:\n"
+            "<code>@Researcher1_ai_bot ты не учёл лимиты бесплатных API</code>\n\n"
+            "<b>3. Управление</b>\n"
+            "<code>/stop</code> — остановить\n"
+            "<code>/steps</code> — лимит шагов\n"
+            "<code>/delay</code> — задержка между агентами\n"
+            "<code>/agentmodel</code> — модель для каждого агента\n\n"
+            "Совет: для бесплатных API ставь 8–12 шагов и задержку 8–15 секунд."
+        )
+        btns = [[InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")]]
+        await self.bot.send_message(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+    async def _show_providers_help(self, cid):
+        text = (
+            "🧩 <b>Бесплатные API-провайдеры</b>\n\n"
+            "Полного легального безлимита у hosted LLM API почти не бывает. Реальный вариант — несколько permanent free tiers + fallback.\n\n"
+            "<b>Сейчас подключено в коде:</b>\n"
+            "1. <b>Mistral API direct</b> — основной провайдер через MISTRAL_API_KEY.\n"
+            "2. <b>OpenRouter</b> — fallback, если есть OPENROUTER_API_KEY.\n"
+            "3. <b>HuggingFace</b> — fallback, если есть HUGGINGFACE_API_KEY.\n\n"
+            "Для бесплатного режима ставь 8–12 шагов, задержку 8–15с и Mistral Small / Nemo для агентов."
+        )
+        await self.bot.send_message(cid, text, parse_mode="HTML")
 
     async def _show_model_picker(self, cid):
         gmr = await self.redis.get(f"global_model:{cid}")
@@ -484,14 +684,16 @@ class AgentBot:
         await self.bot.send_message(cid, "🎛 Агенты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
 
     async def _show_models_list(self, cid):
-        t = "📋 <b>Модели:</b>\n\n<b>OpenRouter:</b>\n"
-        for k, m in FREE_MODELS.items():
-            if m.get("provider") != "huggingface":
-                t += f"• <code>{k}</code> — {m['name']}\n"
-        t += "\n<b>HuggingFace:</b>\n"
-        for k, m in FREE_MODELS.items():
-            if m.get("provider") == "huggingface":
-                t += f"• <code>{k}</code> — {m['name']}\n"
+        t = "📋 <b>Модели:</b>\n"
+        for provider_name, provider_key in [("Mistral API", "mistral"), ("OpenRouter", "openrouter"), ("HuggingFace", "huggingface")]:
+            t += f"\n<b>{provider_name}:</b>\n"
+            found = False
+            for k, m in FREE_MODELS.items():
+                if m.get("provider") == provider_key:
+                    t += f"• <code>{k}</code> — {m['name']}\n"
+                    found = True
+            if not found:
+                t += "• нет моделей\n"
         await self.bot.send_message(cid, t, parse_mode="HTML")
 
     async def _show_config(self, cid):
