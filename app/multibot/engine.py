@@ -552,7 +552,7 @@ class AgentBot:
         await self._think_and_reply(chat_id, task_id, task, [], 0)
 
         async def _think_and_reply(self, chat_id, task_id, task_desc, history, steps):
-        step = steps + 1
+                step = steps + 1
 
         prompt = self.config["prompt"]
         max_steps = await self._get_max_steps(chat_id)
