@@ -1,5 +1,7 @@
 import logging
 import asyncio
+import os
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.config import settings
@@ -21,30 +23,74 @@ async def lifespan(app: FastAPI):
         
         await init_db()
         redis_client = aioredis.from_url(settings.REDIS_URL)
-        
+
+        # Telegram getUpdates допускает только ОДИН poller на один bot token.
+        # На Railway во время redeploy/scale может на несколько секунд существовать 2 контейнера.
+        # Этот Redis-lock не даёт второму контейнеру запускать polling и ловить TelegramConflictError.
+        instance_id = f"{os.environ.get('RAILWAY_DEPLOYMENT_ID', '')}:{uuid.uuid4()}"
+        lock_key = "ai_agents_telegram:multi_bot_polling_lock"
+        lock_ttl = 90
+        lock_acquired = False
+        lock_refresher = None
+
+        for attempt in range(60):
+            lock_acquired = bool(await redis_client.set(lock_key, instance_id, nx=True, ex=lock_ttl))
+            if lock_acquired:
+                break
+            owner = await redis_client.get(lock_key)
+            logger.warning(
+                f"Another bot polling instance is active. Waiting... attempt={attempt + 1}/60 owner={owner.decode() if owner else 'unknown'}"
+            )
+            await asyncio.sleep(1)
+
+        async def refresh_lock():
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    owner = await redis_client.get(lock_key)
+                    if owner and owner.decode() == instance_id:
+                        await redis_client.expire(lock_key, lock_ttl)
+                    else:
+                        logger.error("Lost polling lock. Stopping lock refresher.")
+                        return
+                except Exception as e:
+                    logger.error(f"Polling lock refresh error: {e}")
+
         bots_config = {
             "coordinator": settings.BOT_COORDINATOR_TOKEN,
             "researcher": settings.BOT_RESEARCHER_TOKEN,
             "critic": settings.BOT_CRITIC_TOKEN,
             "executor": settings.BOT_EXECUTOR_TOKEN,
         }
-        
+
         agent_bots = []
-        for role, token in bots_config.items():
-            if token:
-                bot = AgentBot(role, token, redis_client)
-                agent_bots.append(bot)
-                task = asyncio.create_task(bot.start())
-                polling_tasks.append(task)
-        
-        logger.info(f"Multi-bot mode: {len(agent_bots)} bots started")
-        
+        if lock_acquired:
+            lock_refresher = asyncio.create_task(refresh_lock())
+            for role, token in bots_config.items():
+                if token:
+                    bot = AgentBot(role, token, redis_client)
+                    agent_bots.append(bot)
+                    task = asyncio.create_task(bot.start())
+                    polling_tasks.append(task)
+            logger.info(f"Multi-bot mode: {len(agent_bots)} bots started. polling_lock={instance_id}")
+        else:
+            logger.error("Could not acquire polling lock. This container will NOT start Telegram polling.")
+
         yield
-        
+
         for task in polling_tasks:
             task.cancel()
         for bot in agent_bots:
             await bot.stop()
+        if lock_refresher:
+            lock_refresher.cancel()
+        try:
+            owner = await redis_client.get(lock_key)
+            if owner and owner.decode() == instance_id:
+                await redis_client.delete(lock_key)
+                logger.info("Polling lock released")
+        except Exception as e:
+            logger.error(f"Polling lock release error: {e}")
         await redis_client.close()
     
     else:
