@@ -11,6 +11,8 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, URLInputFile
 from app.config import settings, AGENT_BOTS, FREE_MODELS
 from app.llm.router import call_llm_sync, get_provider_for_model, get_llm_router_status
+from app.db.crud import create_task, add_message, update_task_status, update_task
+from app.db.models import TaskStatus
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "critic", "executor"]
@@ -26,6 +28,17 @@ FALLBACK_MODELS = [
     "google/gemma-3-27b-it:free",
     "deepseek-ai/DeepSeek-R1",
 ]
+
+SEARCH_CACHE = {}
+SEARCH_CACHE_TTL = 60 * 30
+
+
+def allowed_user_id(uid):
+    if uid is None:
+        return False
+    if not settings.allowed_user_ids:
+        return True
+    return uid in settings.allowed_user_ids
 
 
 AGENT_MENTIONS = {
@@ -140,7 +153,6 @@ FINAL_PATTERNS = (
     r"\[\s*final\s*\]",
     r"^\s*финальн(?:ый|ая|ое)\s+ответ\s*[:：]",
     r"^\s*итогов(?:ый|ая|ое)\s+ответ\s*[:：]",
-    r"^\s*итог\s*[:：]",
     r"^\s*окончательн(?:ый|ая|ое)\s+ответ\s*[:：]",
     r"обсуждение\s+завершено",
     r"задача\s+завершена",
@@ -151,6 +163,17 @@ def is_final_response(text):
     """Распознаёт финальный ответ в разных форматах, а не только строго [ФИНАЛЬНЫЙ ОТВЕТ]."""
     t = (text or "").strip().lower()
     return any(re.search(pattern, t, flags=re.IGNORECASE | re.MULTILINE) for pattern in FINAL_PATTERNS)
+
+
+def strip_final_markers(text):
+    """Убирает финальные маркеры, если модель попыталась завершить слишком рано."""
+    t = text or ""
+    t = re.sub(r"\[\s*финальн(?:ый|ая|ое)\s+ответ\s*\]", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\[\s*final\s*\]", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*финальн(?:ый|ая|ое)\s+ответ\s*[:：]", "", t, flags=re.IGNORECASE | re.MULTILINE)
+    t = re.sub(r"^\s*итогов(?:ый|ая|ое)\s+ответ\s*[:：]", "", t, flags=re.IGNORECASE | re.MULTILINE)
+    t = re.sub(r"^\s*окончательн(?:ый|ая|ое)\s+ответ\s*[:：]", "", t, flags=re.IGNORECASE | re.MULTILINE)
+    return t.strip()
 
 
 def _extract_json_object(raw):
@@ -239,14 +262,30 @@ def detect_next_agent(text, current_role=None):
 
 
 def search_web(query):
+    q = (query or "").strip()
+    if not q:
+        return ""
+    ck = q.lower()
+    cached = SEARCH_CACHE.get(ck)
+    if cached and (time.time() - cached[0]) < SEARCH_CACHE_TTL:
+        return cached[1]
     try:
         from ddgs import DDGS
         r = []
         with DDGS() as d:
-            for x in d.text(query, max_results=3):
-                r.append(f"- {x.get('title','')}: {x.get('body','')}")
-        return "\n".join(r) if r else ""
-    except:
+            for x in d.text(q, max_results=3):
+                title = x.get('title', '')
+                body = x.get('body', '')
+                href = x.get('href') or x.get('url') or ''
+                r.append(f"- {title}: {body}\n  {href}")
+        result = "\n".join(r) if r else ""
+        SEARCH_CACHE[ck] = (time.time(), result)
+        if len(SEARCH_CACHE) > 100:
+            for k in list(SEARCH_CACHE.keys())[:40]:
+                SEARCH_CACHE.pop(k, None)
+        return result
+    except Exception as e:
+        logger.warning(f"Search error: {str(e)[:120]}")
         return ""
 
 
@@ -272,6 +311,9 @@ class AgentBot:
             if self.role != "coordinator":
                 await cb.answer()
                 return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
+                return
             cid = cb.message.chat.id
             c = cb.data.split(":")[1]
             if c == "menu":
@@ -296,12 +338,33 @@ class AgentBot:
                 await self._show_delay_picker(cid, cb.message)
             elif c == "status":
                 await self._show_status(cid, cb.message)
+            elif c == "history":
+                await self._show_history(cid, cb.message)
+            await cb.answer()
+
+        @self.router.callback_query(F.data.startswith("hist:"))
+        async def hist_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
+                return
+            try:
+                db_task_id = int(cb.data.split(":", 1)[1])
+            except Exception:
+                await cb.answer("❌")
+                return
+            await self._show_task_detail(cb.message.chat.id, db_task_id, cb.message)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("task:"))
         async def task_cb(cb: CallbackQuery):
             if self.role != "coordinator":
                 await cb.answer()
+                return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
                 return
             cid = cb.message.chat.id
             action = cb.data.split(":", 1)[1]
@@ -509,6 +572,10 @@ class AgentBot:
             return
         await self.redis.setex(f"dd:{self.role}:{cid}:{mh}", 60, "1")
         is_human = not (message.from_user and message.from_user.is_bot)
+        if is_human and message.from_user and not allowed_user_id(message.from_user.id):
+            if self.role == "coordinator":
+                await self.bot.send_message(cid, "⛔ Нет доступа.")
+            return
         if is_human and self.role == "coordinator":
             cmd = text.strip().lower()
             if cmd in ("/start", "/help", "/menu"):
@@ -540,6 +607,9 @@ class AgentBot:
                 return
             if cmd == "/status":
                 await self._show_status(cid)
+                return
+            if cmd in ("/history", "/last"):
+                await self._show_history(cid)
                 return
             if cmd == "/cleanup":
                 deleted = await self._cleanup_chat_runtime(cid)
@@ -688,6 +758,83 @@ class AgentBot:
         if v and v.decode() == self.role:
             await self.redis.delete(k)
 
+    async def _show_history(self, cid, message=None):
+        """Показывает последние задачи из Postgres."""
+        try:
+            from sqlalchemy import select
+            from app.db.session import get_session
+            from app.db.models import Task as DBTask
+            async with get_session() as session:
+                res = await session.execute(
+                    select(DBTask).where(DBTask.chat_id == cid).order_by(DBTask.created_at.desc()).limit(8)
+                )
+                tasks = list(res.scalars().all())
+        except Exception as e:
+            logger.warning(f"History load failed: {str(e)[:120]}")
+            tasks = []
+
+        if not tasks:
+            text = "📜 <b>История пуста</b>\n\nНовые multi-bot задачи будут сохраняться после этого обновления."
+            btns = [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+            await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+            return
+
+        text = "📜 <b>Последние задачи</b>\n\n"
+        btns = []
+        for t in tasks:
+            status = getattr(t.status, "value", str(t.status))
+            desc = (t.description or "")[:70].replace("<", "&lt;").replace(">", "&gt;")
+            text += f"<b>#{t.id}</b> · <code>{status}</code> · {t.current_step}/{t.max_steps}\n<i>{desc}</i>\n\n"
+            btns.append([InlineKeyboardButton(text=f"#{t.id} · {desc[:28]}", callback_data=f"hist:{t.id}")])
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")])
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_task_detail(self, cid, db_task_id, message=None):
+        """Показывает детали одной задачи из Postgres."""
+        try:
+            from sqlalchemy import select
+            from app.db.session import get_session
+            from app.db.models import Task as DBTask, Message as DBMessage
+            async with get_session() as session:
+                task_res = await session.execute(select(DBTask).where(DBTask.id == db_task_id, DBTask.chat_id == cid))
+                task = task_res.scalar_one_or_none()
+                msg_res = await session.execute(
+                    select(DBMessage).where(DBMessage.task_id == db_task_id).order_by(DBMessage.created_at.desc()).limit(6)
+                )
+                messages = list(msg_res.scalars().all())
+        except Exception as e:
+            logger.warning(f"Task detail load failed: {str(e)[:120]}")
+            task, messages = None, []
+
+        if not task:
+            text = "❌ Задача не найдена."
+        else:
+            status = getattr(task.status, "value", str(task.status))
+            desc = (task.description or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            final = (task.final_answer or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            text = (
+                f"📄 <b>Задача #{task.id}</b>\n\n"
+                f"<b>Статус:</b> <code>{status}</code>\n"
+                f"<b>Шаги:</b> {task.current_step}/{task.max_steps}\n"
+                f"<b>Модель:</b> <code>{task.model or ''}</code>\n\n"
+                f"<b>Описание:</b>\n<i>{desc[:900]}</i>\n\n"
+            )
+            if final:
+                text += f"<b>Финал:</b>\n<code>{final[:900]}</code>\n\n"
+            if messages:
+                text += "<b>Последние сообщения:</b>\n"
+                for m in reversed(messages):
+                    clean = re.sub(r"<[^>]+>", "", m.content or "")
+                    clean = clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    text += f"• <b>{m.role}</b>: <code>{clean[:220]}</code>\n"
+            if len(text) > 3900:
+                text = text[:3900] + "..."
+        btns = [
+            [InlineKeyboardButton(text="⬅️ История", callback_data="cmd:history")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
     async def _show_status(self, cid, message=None):
         active = await self.redis.get(f"active_task:{cid}")
         if not active:
@@ -740,7 +887,7 @@ class AgentBot:
         btns = [
             [InlineKeyboardButton(text="✅ Финализировать сейчас", callback_data="task:finalize")],
             [InlineKeyboardButton(text="🛑 Остановить", callback_data="task:stop"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
-            [InlineKeyboardButton(text="🔄 Обновить", callback_data="task:status")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="task:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
         ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
@@ -756,7 +903,8 @@ class AgentBot:
         btns = [
             [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
             [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
-            [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize")],
+            [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
+            [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
             [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
             [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
@@ -1001,6 +1149,12 @@ class AgentBot:
         model = await self._get_model(cid)
         ms = await self._get_max_steps(cid)
         dl = await self._get_delay(cid)
+        try:
+            db_task = await create_task(cid, message.from_user.id if message.from_user else 0, task, model)
+            await update_task(db_task.id, max_steps=ms)
+            await self.redis.setex(f"db_task_id:{cid}:{tid}", 7200, str(db_task.id))
+        except Exception as e:
+            logger.warning(f"DB task create failed: {str(e)[:120]}")
         await self.bot.send_message(cid, f"🎯 Задача!\n\n📝 {task}\n🤖 {model.split('/')[-1]}\n📊 {ms} шагов ⏱ {dl}с\n\nНачинаю...")
         await asyncio.sleep(2)
         await self._think_and_reply(cid, tid, task, [], 0)
@@ -1013,6 +1167,7 @@ class AgentBot:
         await self.redis.delete(f"llm_fail:{cid}:{tid}")
         await self.redis.delete(f"finalizing:{cid}:{tid}")
         await self.redis.delete(f"lock:task:{cid}:{tid}")
+        await self.redis.delete(f"db_task_id:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
             await self.redis.delete(f"rate:{role}:{cid}")
@@ -1027,8 +1182,14 @@ class AgentBot:
             f"lock:task:{cid}:{tid}",
         )
 
-    async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены."):
+    async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены.", final_answer=None):
         """Единая точка завершения задачи."""
+        try:
+            dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
+            if dbid:
+                await update_task_status(int(dbid.decode()), TaskStatus.COMPLETED, final_answer or completion_message)
+        except Exception as e:
+            logger.warning(f"DB task complete failed: {str(e)[:120]}")
         await self._clear_task_runtime_keys(cid, tid)
         if completion_message:
             try:
@@ -1074,7 +1235,7 @@ class AgentBot:
                 msg = msg[:4000] + "..."
             await self.bot.send_message(cid, msg)
             await self._save_message(cid, tid, "Координатор", msg)
-            await self._complete_task(cid, tid, "✅ Завершено. Задача закрыта, дальнейшие ходы остановлены.")
+            await self._complete_task(cid, tid, "✅ Завершено. Задача закрыта, дальнейшие ходы остановлены.", response)
         except Exception as e:
             logger.error(f"Force finalize error: {e}")
             await self._clear_task_runtime_keys(cid, tid)
@@ -1141,6 +1302,27 @@ class AgentBot:
         response = normalize_agent_mentions(response)
         logger.info(f"Structured response: role={self.role}, parsed={parsed_ok}, final={parsed_final}, next={parsed_next_agent}")
 
+        # Защита от слишком ранней финализации: модель иногда ставит final=true уже на 2-3 шаге.
+        final_requested = parsed_final or is_final_response(response)
+        min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
+        final_allowed = (
+            self.role == "coordinator" and (
+                step >= min_final_steps or bool(final_reason) or int(steps) >= max(0, ms - 1)
+            )
+        )
+        if final_requested and not final_allowed:
+            logger.warning(
+                f"Early final blocked: role={self.role}, step={step}, min={min_final_steps}, task={tid}"
+            )
+            response = strip_final_markers(response)
+            if not response:
+                response = "Пока рано завершать задачу. Продолжаю обсуждение и передаю ход дальше."
+            response += f"\n\n⚠️ Финализация пока рано: шаг {step}/{ms}. Продолжаем обсуждение."
+            parsed_final = False
+            if not parsed_next_agent or parsed_next_agent == self.role:
+                idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
+                parsed_next_agent = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
             r = await asyncio.to_thread(search_web, q)
@@ -1161,9 +1343,15 @@ class AgentBot:
         delay = await self._get_delay(cid)
         await self.redis.setex(f"rate:{self.role}:{cid}", delay * 2, str(time.time()))
         new_steps = await self.redis.incr(f"steps:{cid}:{tid}")
+        try:
+            dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
+            if dbid:
+                await update_task(int(dbid.decode()), current_step=int(new_steps), status=TaskStatus.IN_PROGRESS)
+        except Exception as e:
+            logger.warning(f"DB task step update failed: {str(e)[:120]}")
         await self._save_message(cid, tid, self.config["name"], msg)
-        if parsed_final or is_final_response(response):
-            await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.")
+        if (parsed_final or is_final_response(response)) and final_allowed:
+            await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.", response)
             return
 
         if int(new_steps) >= ms:
@@ -1195,6 +1383,12 @@ class AgentBot:
         await self.redis.rpush(k, json.dumps({"role": "user", "content": f"{sender}: {text}"}))
         await self.redis.ltrim(k, -20, -1)
         await self.redis.expire(k, 7200)
+        try:
+            dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
+            if dbid:
+                await add_message(int(dbid.decode()), str(sender), str(text)[:4000], msg_type="multibot")
+        except Exception as e:
+            logger.warning(f"DB message save failed: {str(e)[:120]}")
 
     async def start(self):
         await self.bot.delete_webhook(drop_pending_updates=True)
