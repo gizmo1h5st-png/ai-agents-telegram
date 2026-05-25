@@ -49,6 +49,16 @@ CORRECT_USERNAMES_PROMPT = """
 Если в истории есть "Замечание пользователя" для тебя — это приоритетная обратная связь: учти её, пересмотри вывод и при необходимости измени точку зрения.
 """
 
+FINALIZATION_PROMPT = """
+
+РЕЖИМ ФИНАЛИЗАЦИИ:
+Лимит обсуждения почти достигнут или возникла ошибка модели.
+Сейчас нужно завершить обсуждение, а не передавать ход дальше.
+Обязательно начни ответ с маркера: [ФИНАЛЬНЫЙ ОТВЕТ]
+Дай краткий итог: решение, основные аргументы, ограничения и следующие практические шаги.
+Не упоминай следующего агента и не ставь @username в конце.
+"""
+
 
 def normalize_agent_mentions(text):
     """Исправляет старые/ошибочные упоминания перед отправкой и парсингом."""
@@ -280,13 +290,16 @@ class AgentBot:
         return self._my_id
 
     async def _get_model(self, cid):
-        am = await self.redis.get(f"agent_model:{cid}:{self.role}")
+        return await self._get_model_for_role(cid, self.role)
+
+    async def _get_model_for_role(self, cid, role):
+        am = await self.redis.get(f"agent_model:{cid}:{role}")
         if am:
             return am.decode()
         gm = await self.redis.get(f"global_model:{cid}")
         if gm:
             return gm.decode()
-        return settings.get_agent_model(self.role)
+        return settings.get_agent_model(role)
 
     async def _get_delay(self, cid):
         v = await self.redis.get(f"delay:{cid}")
@@ -546,17 +559,101 @@ class AgentBot:
         await asyncio.sleep(2)
         await self._think_and_reply(cid, tid, task, [], 0)
 
+    async def _force_finalize(self, cid, tid, td, reason="Достигнут лимит обсуждения."):
+        """Принудительно завершает задачу, чтобы обсуждение не зависало бесконечно."""
+        lock_key = f"finalizing:{cid}:{tid}"
+        got_lock = await self.redis.set(lock_key, self.role, nx=True, ex=300)
+        if not got_lock:
+            return
+
+        try:
+            history = await self._get_history(cid, tid)
+            llm_msgs = [
+                {"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]}
+                for m in history[-12:]
+            ]
+            prompt = AGENT_BOTS["coordinator"]["prompt"] + CORRECT_USERNAMES_PROMPT + FINALIZATION_PROMPT
+            model = await self._get_model_for_role(cid, "coordinator")
+            response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model)
+
+            if not response:
+                short_history = "\n".join([m.get("content", "")[:500] for m in history[-8:]])
+                response = (
+                    "[ФИНАЛЬНЫЙ ОТВЕТ]\n"
+                    f"Обсуждение завершено принудительно. Причина: {reason}\n\n"
+                    f"Задача: {td}\n\n"
+                    "Краткий итог по последним сообщениям команды:\n"
+                    f"{short_history if short_history else 'История обсуждения пуста или недоступна.'}\n\n"
+                    "Рекомендация: использовать этот итог как черновик и при необходимости запустить новую задачу с уточнениями."
+                )
+
+            response = normalize_agent_mentions(response)
+            if "[ФИНАЛЬНЫЙ ОТВЕТ]" not in response and "[FINAL]" not in response:
+                response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + response
+
+            msg = f"🎯 {response}"
+            if len(msg) > 4000:
+                msg = msg[:4000] + "..."
+            await self.bot.send_message(cid, msg)
+            await self._save_message(cid, tid, "Координатор", msg)
+            await self.redis.delete(f"active_task:{cid}")
+            await self.redis.delete(f"llm_fail:{cid}:{tid}")
+            await self.redis.delete(f"turn:{cid}:{tid}")
+            await self.bot.send_message(cid, "✅ Завершено.")
+        except Exception as e:
+            logger.error(f"Force finalize error: {e}")
+            await self.redis.delete(f"active_task:{cid}")
+            try:
+                await self.bot.send_message(cid, f"✅ Обсуждение остановлено по лимиту/ошибке. Причина: {str(e)[:120]}")
+            except Exception:
+                pass
+
+    async def _redirect_to_coordinator_for_final(self, cid, tid, td, reason="Достигнут лимит обсуждения."):
+        """Передаёт финализацию координатору, если текущий агент не координатор."""
+        await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
+        await self.redis.setex(f"final_reason:{cid}:{tid}", 600, reason)
+        await self.redis.setex(f"pending:{cid}:coordinator", 300, f"{tid}:{td}")
+
     async def _think_and_reply(self, cid, tid, td, hist, steps):
         step = steps + 1
         prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT
         ms = await self._get_max_steps(cid)
+
         if self.role == "coordinator" and step < 5:
             prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа."
+        elif self.role == "coordinator" and step >= max(6, ms - 2):
+            prompt += FINALIZATION_PROMPT
+        elif self.role == "coordinator" and step >= 6:
+            prompt += "\n\nЕсли данных уже достаточно, заверши обсуждение через [ФИНАЛЬНЫЙ ОТВЕТ]. Не растягивай диалог без необходимости."
+
+        final_reason = await self.redis.get(f"final_reason:{cid}:{tid}")
+        if final_reason and self.role == "coordinator":
+            prompt += FINALIZATION_PROMPT
+
         llm_msgs = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in hist[-10:]]
         model = await self._get_model(cid)
         response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model)
         if not response:
+            fail_key = f"llm_fail:{cid}:{tid}"
+            fails = await self.redis.incr(fail_key)
+            await self.redis.expire(fail_key, 900)
+            logger.warning(f"LLM empty response: role={self.role}, task={tid}, fails={fails}")
+
+            if self.role == "coordinator" and (fails >= 2 or step >= ms):
+                await self._force_finalize(cid, tid, td, "Модель не вернула ответ или исчерпан лимит шагов.")
+                return
+
+            if fails >= 2 or step >= ms:
+                await self._redirect_to_coordinator_for_final(cid, tid, td, "Модель не вернула ответ или исчерпан лимит шагов.")
+                return
+
+            idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
+            na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+            await self.redis.setex(f"turn:{cid}:{tid}", 600, na)
+            await self.redis.setex(f"pending:{cid}:{na}", 300, f"{tid}:{td}")
             return
+
+        await self.redis.delete(f"llm_fail:{cid}:{tid}")
         response = normalize_agent_mentions(response)
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
@@ -577,12 +674,21 @@ class AgentBot:
                 pass
         delay = await self._get_delay(cid)
         await self.redis.setex(f"rate:{self.role}:{cid}", delay * 2, str(time.time()))
-        await self.redis.incr(f"steps:{cid}:{tid}")
+        new_steps = await self.redis.incr(f"steps:{cid}:{tid}")
         await self._save_message(cid, tid, self.config["name"], msg)
         if "[ФИНАЛЬНЫЙ ОТВЕТ]" in response or "[FINAL]" in response:
             await self.redis.delete(f"active_task:{cid}")
+            await self.redis.delete(f"final_reason:{cid}:{tid}")
             await self.bot.send_message(cid, "✅ Завершено!")
             return
+
+        if int(new_steps) >= ms:
+            if self.role == "coordinator":
+                await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+            else:
+                await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+            return
+
         na = detect_next_agent(response, current_role=self.role)
         if not na:
             idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
@@ -641,6 +747,10 @@ class AgentBot:
                     steps = int(sr) if sr else 0
                     ms = await self._get_max_steps(cid)
                     if steps >= ms:
+                        if self.role == "coordinator":
+                            await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
+                        else:
+                            await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
                         continue
                     await self._think_and_reply(cid, tid, td, history, steps)
             except Exception as e:
