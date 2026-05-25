@@ -493,6 +493,13 @@ class AgentBot:
             na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
         await self.redis.setex(f"turn:{chat_id}:{task_id}", 600, na)
         await asyncio.sleep(delay)
+        # Триггерим следующего бота — отправляем невидимое сообщение
+        try:
+            trigger_msg = await self.bot.send_message(chat_id, f"➡️ @{na}, твой ход")
+            await asyncio.sleep(1)
+            await self.bot.delete_message(chat_id, trigger_msg.message_id)
+        except:
+            pass
 
     async def _get_history(self, chat_id, task_id):
         key = f"history:{chat_id}:{task_id}"
