@@ -46,6 +46,7 @@ CORRECT_USERNAMES_PROMPT = """
 Не придумывай диалог за других агентов. Не задавай вопросы самому себе.
 В конце ответа, если обсуждение не завершено, передай ход ровно одному ДРУГОМУ агенту через его @username.
 Никогда не передавай ход самому себе.
+Если в истории есть "Замечание пользователя" для тебя — это приоритетная обратная связь: учти её, пересмотри вывод и при необходимости измени точку зрения.
 """
 
 
@@ -54,6 +55,42 @@ def normalize_agent_mentions(text):
     if not text:
         return text
     return text.replace("@coordinator_ai_bot", "@coordintor_ai_bot")
+
+
+def detect_addressed_agent(text):
+    """Определяет, какому агенту пользователь адресовал замечание.
+
+    Поддерживает форматы:
+    - @Researcher1_ai_bot ты ошибся ...
+    - Исследователь, учти ...
+    - критик: проверь ещё раз ...
+    """
+    t = (text or "").lower().strip()
+    if not t:
+        return None
+
+    # Явные @username.
+    for role in ROLE_ORDER:
+        if any(m.lower() in t for m in AGENT_MENTIONS.get(role, ())):
+            return role
+
+    # Обращение по роли в начале сообщения.
+    for role, patterns in AGENT_NAME_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(rf"^\s*(?:ai\s+)?{pattern}[\s,.:;!—-]+", t):
+                return role
+
+    return None
+
+
+def clean_feedback_text(text):
+    """Убирает из замечания явный @username в начале/тексте, чтобы LLM видел суть."""
+    cleaned = normalize_agent_mentions(text or "").strip()
+    for mentions in AGENT_MENTIONS.values():
+        for mention in mentions:
+            cleaned = re.sub(re.escape(mention), "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^\s*(координатор|исследователь|критик|исполнитель)[\s,.:;!—-]+", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned or (text or "").strip()
 
 
 def detect_next_agent(text, current_role=None):
@@ -265,9 +302,12 @@ class AgentBot:
         if message.from_user and message.from_user.id == await self._get_my_id():
             return
         mh = hashlib.md5(f"{message.message_id}".encode()).hexdigest()[:12]
-        if await self.redis.exists(f"dd:{cid}:{mh}"):
+        # Дедупликация должна быть на уровне конкретного бота.
+        # Если ключ общий для всех 4 ботов, один бот может "съесть" сообщение,
+        # адресованное другому боту.
+        if await self.redis.exists(f"dd:{self.role}:{cid}:{mh}"):
             return
-        await self.redis.setex(f"dd:{cid}:{mh}", 60, "1")
+        await self.redis.setex(f"dd:{self.role}:{cid}:{mh}", 60, "1")
         is_human = not (message.from_user and message.from_user.is_bot)
         if is_human and self.role == "coordinator":
             cmd = text.strip().lower()
@@ -324,6 +364,74 @@ class AgentBot:
                 await self.bot.send_message(cid, "🛑 Остановлено.")
             return
 
+        # Пользователь может вмешаться в ход обсуждения и дать замечание конкретному агенту.
+        # Форматы: ответом на сообщение бота, через @username или по роли в начале сообщения.
+        if is_human:
+            target_role = await self._detect_feedback_target(message)
+            if target_role == self.role:
+                await self._handle_human_feedback(message)
+                return
+
+    async def _detect_feedback_target(self, message: Message):
+        """Понимает, адресовано ли человеческое замечание этому/другому агенту."""
+        text = message.text or ""
+
+        # Если пользователь ответил reply на сообщение этого бота — замечание точно для него.
+        if message.reply_to_message and message.reply_to_message.from_user:
+            if message.reply_to_message.from_user.id == await self._get_my_id():
+                return self.role
+
+        return detect_addressed_agent(text)
+
+    async def _handle_human_feedback(self, message: Message):
+        """Сохраняет замечание пользователя в историю и запускает ответ адресованного агента."""
+        cid = message.chat.id
+        text = message.text or ""
+        active = await self.redis.get(f"active_task:{cid}")
+
+        if not active:
+            await self.bot.send_message(
+                cid,
+                f"{self.config['emoji']} Принял замечание, но сейчас нет активной задачи. "
+                f"Запусти обсуждение через: <code>Задача: описание</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        tid = int(active.decode())
+        task_raw = await self.redis.get(f"task_desc:{cid}:{tid}")
+        td = task_raw.decode() if task_raw else ""
+        feedback = clean_feedback_text(text)
+        user_name = "Пользователь"
+        if message.from_user:
+            user_name = message.from_user.full_name or message.from_user.username or "Пользователь"
+
+        note = (
+            f"Замечание пользователя для агента {self.config['name']} ({self.role}).\n"
+            f"Автор: {user_name}.\n"
+            f"Текст замечания: {feedback}\n\n"
+            f"Инструкция агенту: обязательно учти это замечание, пересмотри свой предыдущий вывод "
+            f"и при необходимости измени точку зрения. Если пользователь прав — признай это. "
+            f"Не спорь ради спора и не игнорируй обратную связь."
+        )
+        await self._save_message(cid, tid, "Пользователь", note)
+
+        # Даём адресованному агенту ближайший ход.
+        await self.redis.setex(f"turn:{cid}:{tid}", 600, self.role)
+
+        # Если лимит шагов уже достигнут, откатываем счётчик на 1, чтобы агент мог ответить на замечание.
+        sr = await self.redis.get(f"steps:{cid}:{tid}")
+        ms = await self._get_max_steps(cid)
+        steps = int(sr) if sr else 0
+        if steps >= ms and ms > 0:
+            await self.redis.setex(f"steps:{cid}:{tid}", 7200, str(ms - 1))
+
+        await self.redis.setex(f"pending:{cid}:{self.role}", 300, f"{tid}:{td}")
+        await self.bot.send_message(
+            cid,
+            f"{self.config['emoji']} Принял замечание и пересмотрю позицию с учётом вашей правки."
+        )
+
     async def _show_menu(self, cid):
         gmr = await self.redis.get(f"global_model:{cid}")
         gm = (gmr.decode() if gmr else settings.DEFAULT_MODEL).split("/")[-1].replace(":free", "")
@@ -335,7 +443,7 @@ class AgentBot:
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
             [InlineKeyboardButton(text="🔄 Сброс", callback_data="resetmodels")],
         ]
-        await self.bot.send_message(cid, f"🎯 <b>AI Agents Team</b>\n\n🤖 <code>{gm}</code>\n📊 {ms} шагов\n⏱ {dl}с\n\n<b>Задачи:</b> <code>Задача: описание</code>\n/stop\n/search запрос\n/image описание", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        await self.bot.send_message(cid, f"🎯 <b>AI Agents Team</b>\n\n🤖 <code>{gm}</code>\n📊 {ms} шагов\n⏱ {dl}с\n\n<b>Задачи:</b> <code>Задача: описание</code>\n<b>Замечания:</b> ответь на сообщение бота или напиши <code>@Researcher1_ai_bot текст</code>\n/stop\n/search запрос\n/image описание", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
 
     async def _show_model_picker(self, cid):
         gmr = await self.redis.get(f"global_model:{cid}")
