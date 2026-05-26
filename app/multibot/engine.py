@@ -457,6 +457,8 @@ class AgentBot:
                 await self._show_config(cid, cb.message)
             elif c == "agents":
                 await self._show_agents_dashboard(cid, cb.message)
+            elif c == "team":
+                await self._show_team_picker(cid, cb.message)
             elif c == "providers":
                 await self._show_providers_help(cid, cb.message)
             elif c == "help":
@@ -548,6 +550,49 @@ class AgentBot:
                 return
 
             await cb.answer("Неизвестное действие", show_alert=True)
+
+        @self.router.callback_query(F.data.startswith("team:"))
+        async def team_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
+                return
+            cid = cb.message.chat.id
+            action = cb.data.split(":", 1)[1]
+            if action.startswith("toggle:"):
+                role = action.split(":", 1)[1]
+                if role not in ROLE_ORDER or role == "coordinator":
+                    await cb.answer("Координатор обязателен", show_alert=True)
+                    return
+                team = await self._get_team(cid)
+                if role in team:
+                    if len(team) <= 2:
+                        await cb.answer("Минимум 2 агента", show_alert=True)
+                        return
+                    team.remove(role)
+                else:
+                    team.append(role)
+                team = [r for r in ROLE_ORDER if r in set(team)]
+                if "coordinator" not in team:
+                    team.insert(0, "coordinator")
+                await self._set_team(cid, team)
+                await self._show_team_picker(cid, cb.message)
+                await cb.answer("Команда обновлена")
+                return
+            presets = {
+                "all": ROLE_ORDER,
+                "core": ["coordinator", "researcher", "executor", "critic"],
+                "tech": ["coordinator", "researcher", "architect", "executor", "qa", "critic"],
+                "fast": ["coordinator", "executor", "critic"],
+            }
+            if action in presets:
+                await self._set_team(cid, list(presets[action]))
+                await self._show_team_picker(cid, cb.message)
+                await cb.answer("Пресет выбран")
+                return
+            await cb.answer("❌")
 
         @self.router.callback_query(F.data.startswith("gm:"))
         async def gm_cb(cb: CallbackQuery):
@@ -670,6 +715,46 @@ class AgentBot:
         v = await self.redis.get(f"max_steps:{cid}")
         return int(v) if v else settings.MAX_DISCUSSION_STEPS
 
+    async def _get_team(self, cid):
+        raw = await self.redis.get(f"team:{cid}")
+        if raw:
+            try:
+                team = json.loads(raw.decode())
+                team = [r for r in team if r in ROLE_ORDER]
+                if team:
+                    if "coordinator" not in team:
+                        team.insert(0, "coordinator")
+                    return [r for r in ROLE_ORDER if r in set(team)]
+            except Exception:
+                pass
+        return list(ROLE_ORDER)
+
+    async def _set_team(self, cid, team):
+        team = [r for r in team if r in ROLE_ORDER]
+        if "coordinator" not in team:
+            team.insert(0, "coordinator")
+        team = [r for r in ROLE_ORDER if r in set(team)]
+        await self.redis.setex(f"team:{cid}", 86400 * 30, json.dumps(team))
+
+    async def _get_task_team(self, cid, tid):
+        raw = await self.redis.get(f"task_team:{cid}:{tid}")
+        if raw:
+            try:
+                team = json.loads(raw.decode())
+                return [r for r in ROLE_ORDER if r in set(team)] or list(ROLE_ORDER)
+            except Exception:
+                pass
+        return await self._get_team(cid)
+
+    def _next_role_after(self, current_role, team):
+        team = [r for r in team if r in ROLE_ORDER]
+        if not team:
+            team = list(ROLE_ORDER)
+        if current_role in team:
+            idx = team.index(current_role)
+            return team[(idx + 1) % len(team)]
+        return team[0]
+
     async def _send_or_edit(self, cid, text, reply_markup=None, parse_mode="HTML", message=None):
         """Редактирует текущее меню по inline-кнопке, а не плодит новые сообщения."""
         if message:
@@ -718,6 +803,9 @@ class AgentBot:
                 return
             if cmd == "/agentmodel":
                 await self._show_agent_model_picker(cid)
+                return
+            if cmd == "/team":
+                await self._show_team_picker(cid)
                 return
             if cmd in ("/showconfig", "/config"):
                 await self._show_config(cid)
@@ -1060,8 +1148,9 @@ class AgentBot:
         status = "🟢 активна" if active else "⚪ нет активной задачи"
 
         btns = [
-            [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
-            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
+            [InlineKeyboardButton(text="👥 Команда", callback_data="cmd:team"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
+            [InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
+            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
             [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
@@ -1070,23 +1159,49 @@ class AgentBot:
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
         ]
 
+        team = await self._get_team(cid)
+        team_line = " → ".join([f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}" for r in team])
         text = (
             "<b>🚀 AI Agents Team</b>\n"
-            "<i>4 Telegram-агента: координатор, исследователь, критик, исполнитель.</i>\n\n"
+            "<i>6 Telegram-агентов: координатор, исследователь, архитектор, исполнитель, QA, критик.</i>\n\n"
             f"<b>Состояние:</b> {status}\n"
+            f"<b>Активная команда:</b> {team_line}\n"
             f"<b>Общая модель:</b> <code>{gm}</code>\n"
             f"<b>Лимит:</b> {ms} шагов · <b>Пауза:</b> {dl}с\n\n"
             "<b>Быстрый старт:</b>\n"
             "• <code>Задача: опиши задачу</code> — начать обсуждение\n"
+            "• <code>/team</code> — выбрать состав агентов\n"
             "• <code>/stop</code> — остановить активную задачу\n"
-            "• Замечание агенту: ответь reply на сообщение бота или напиши <code>@Researcher1_ai_bot текст</code>\n\n"
+            "• Замечание агенту: reply на сообщение бота или <code>@Qabotai_bot текст</code>\n\n"
             "<b>Правильные usernames:</b>\n"
             "🎯 <code>@coordintor_ai_bot</code>\n"
             "🔍 <code>@Researcher1_ai_bot</code>\n"
-            "🧐 <code>@criticaibot_bot</code>\n"
-            "⚡ <code>@executorai_ai_bot</code>"
+            "🏗️ <code>@Architect1_ai_bot</code>\n"
+            "⚡ <code>@executorai_ai_bot</code>\n"
+            "🧪 <code>@Qabotai_bot</code>\n"
+            "🧐 <code>@criticaibot_bot</code>"
         )
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_team_picker(self, cid, message=None):
+        team = await self._get_team(cid)
+        team_set = set(team)
+        lines = ["👥 <b>Команда ИИ-агентов для этого чата</b>", ""]
+        lines.append("<b>Сейчас:</b> " + " → ".join([f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}" for r in team]))
+        lines.append("")
+        lines.append("Выключи ненужных агентов для простых задач. Координатор обязателен.")
+        btns = []
+        for r in ROLE_ORDER:
+            cfg = AGENT_BOTS[r]
+            mark = "✅" if r in team_set else "☐"
+            lock = " 🔒" if r == "coordinator" else ""
+            btns.append([InlineKeyboardButton(text=f"{mark} {cfg['emoji']} {cfg['name']}{lock}", callback_data=f"team:toggle:{r}")])
+        btns += [
+            [InlineKeyboardButton(text="👑 Все 6", callback_data="team:all"), InlineKeyboardButton(text="🧩 База 4", callback_data="team:core")],
+            [InlineKeyboardButton(text="🛠 Тех-команда", callback_data="team:tech"), InlineKeyboardButton(text="⚡ Быстро", callback_data="team:fast")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, "\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _show_agents_dashboard(self, cid, message=None):
         btns = []
@@ -1306,6 +1421,8 @@ class AgentBot:
         tid = int(time.time()) % 1000000
         await self.redis.setex(f"active_task:{cid}", 7200, str(tid))
         await self.redis.setex(f"task_desc:{cid}:{tid}", 7200, task)
+        team = await self._get_team(cid)
+        await self.redis.setex(f"task_team:{cid}:{tid}", 7200, json.dumps(team))
         await self.redis.set(f"steps:{cid}:{tid}", "0")
         await self.redis.expire(f"steps:{cid}:{tid}", 7200)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
@@ -1318,7 +1435,8 @@ class AgentBot:
             await self.redis.setex(f"db_task_id:{cid}:{tid}", 7200, str(db_task.id))
         except Exception as e:
             logger.warning(f"DB task create failed: {str(e)[:120]}")
-        await self.bot.send_message(cid, f"🎯 Задача!\n\n📝 {task}\n🤖 {model.split('/')[-1]}\n📊 {ms} шагов ⏱ {dl}с\n\nНачинаю...")
+        team_label = " → ".join([AGENT_BOTS[r]["emoji"] for r in team])
+        await self.bot.send_message(cid, f"🎯 Задача!\n\n📝 {task}\n🤖 {model.split('/')[-1]}\n👥 {team_label}\n📊 {ms} шагов ⏱ {dl}с\n\nНачинаю...")
         await asyncio.sleep(2)
         await self._think_and_reply(cid, tid, task, [], 0)
 
@@ -1331,6 +1449,7 @@ class AgentBot:
         await self.redis.delete(f"finalizing:{cid}:{tid}")
         await self.redis.delete(f"lock:task:{cid}:{tid}")
         await self.redis.delete(f"db_task_id:{cid}:{tid}")
+        await self.redis.delete(f"task_team:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
             await self.redis.delete(f"rate:{role}:{cid}")
@@ -1343,6 +1462,7 @@ class AgentBot:
             f"llm_fail:{cid}:{tid}",
             f"finalizing:{cid}:{tid}",
             f"lock:task:{cid}:{tid}",
+            f"task_team:{cid}:{tid}",
         )
 
     async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены.", final_answer=None):
@@ -1425,8 +1545,14 @@ class AgentBot:
         step = steps + 1
         prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT + STRUCTURED_OUTPUT_PROMPT
         ms = await self._get_max_steps(cid)
+        team = await self._get_task_team(cid, tid)
+        prompt += "\n\nАктивная команда для этой задачи: " + ", ".join([f"{r}={AGENT_BOTS[r]['name']}" for r in team])
+        prompt += "\nПередавай ход только агентам из активной команды."
 
-        if self.role == "coordinator" and step < 5:
+        min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
+        if step < min_final_steps:
+            prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа. final=false. Не используй [ФИНАЛЬНЫЙ ОТВЕТ] до шага {min_final_steps}."
+        elif self.role == "coordinator" and step < 5:
             prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа."
         elif self.role == "coordinator" and step >= max(6, ms - 2):
             prompt += FINALIZATION_PROMPT
@@ -1454,8 +1580,7 @@ class AgentBot:
                 await self._redirect_to_coordinator_for_final(cid, tid, td, "Модель не вернула ответ или исчерпан лимит шагов.")
                 return
 
-            idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
-            na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+            na = self._next_role_after(self.role, team)
             await self.redis.setex(f"turn:{cid}:{tid}", 600, na)
             await self.redis.setex(f"pending:{cid}:{na}", 300, f"{tid}:{td}")
             return
@@ -1467,9 +1592,8 @@ class AgentBot:
 
         # Защита от слишком ранней финализации: модель иногда ставит final=true уже на 2-3 шаге.
         final_requested = parsed_final or is_final_response(response)
-        min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
         roles_seen = await self._get_roles_seen(cid, tid)
-        required_roles = required_roles_before_final()
+        required_roles = [r for r in required_roles_before_final() if r in team]
         missing_roles = [r for r in required_roles if r not in roles_seen]
         required_ok = not missing_roles
         incomplete_final = final_requested and is_incomplete_final_response(response)
@@ -1496,8 +1620,7 @@ class AgentBot:
                 response += f"\n\n⚠️ Финализация пока рано: шаг {step}/{ms}. Продолжаем обсуждение."
             parsed_final = False
             if not parsed_next_agent or parsed_next_agent == self.role:
-                idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
-                parsed_next_agent = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+                parsed_next_agent = self._next_role_after(self.role, team)
 
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
@@ -1538,14 +1661,15 @@ class AgentBot:
             return
 
         na = parsed_next_agent
+        if na not in team:
+            na = None
         if not na:
-            na = detect_next_agent(response, current_role=self.role)
+            detected = detect_next_agent(response, current_role=self.role)
+            na = detected if detected in team else None
         if not na:
-            idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
-            na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+            na = self._next_role_after(self.role, team)
         if na == self.role:
-            idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
-            na = ROLE_ORDER[(idx + 1) % len(ROLE_ORDER)]
+            na = self._next_role_after(self.role, team)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, na)
         await asyncio.sleep(delay)
         await self.redis.setex(f"pending:{cid}:{na}", 300, f"{tid}:{td}")
@@ -1597,9 +1721,15 @@ class AgentBot:
                     if active.decode() != str(tid):
                         await self._clear_stale_task_keys(cid, tid)
                         continue
+                    team = await self._get_task_team(cid, tid)
+                    if self.role not in team:
+                        continue
                     ct = await self.redis.get(f"turn:{cid}:{tid}")
                     if ct and ct.decode() != self.role:
-                        continue
+                        if ct.decode() not in team and self.role == team[0]:
+                            await self.redis.setex(f"turn:{cid}:{tid}", 600, self.role)
+                        else:
+                            continue
                     delay = await self._get_delay(cid)
                     rk = f"rate:{self.role}:{cid}"
                     last = await self.redis.get(rk)
