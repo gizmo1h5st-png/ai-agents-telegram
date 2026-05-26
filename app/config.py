@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     BOT_RESEARCHER_TOKEN: str = ""
     BOT_CRITIC_TOKEN: str = ""
     BOT_EXECUTOR_TOKEN: str = ""
+    BOT_ARCHITECT_TOKEN: str = ""
+    BOT_QA_TOKEN: str = ""
+
+    # Telegram Web App / Mini App
+    WEBAPP_URL: str = ""
+    PUBLIC_BASE_URL: str = ""
+    FASTAPI_SECRET_KEY: str = ""
+    TELEGRAM_WEBHOOK_SECRET: str = ""
     
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://localhost/aiagents"
@@ -36,6 +44,8 @@ class Settings(BaseSettings):
     RESEARCHER_MODEL: str = ""
     CRITIC_MODEL: str = ""
     EXECUTOR_MODEL: str = ""
+    ARCHITECT_MODEL: str = ""
+    QA_MODEL: str = ""
     
     # Limits
     MAX_STEPS_PER_TASK: int = 50
@@ -46,7 +56,8 @@ class Settings(BaseSettings):
     # Loop prevention
     MIN_REPLY_INTERVAL: int = 8
     MAX_DISCUSSION_STEPS: int = 50
-    MIN_FINAL_STEPS: int = 6
+    MIN_FINAL_STEPS: int = 12
+    REQUIRED_ROLES_BEFORE_FINAL: str = "researcher,architect,executor,qa,critic"
     IDLE_TIMEOUT_MINUTES: int = 10
 
     @property
@@ -74,6 +85,8 @@ class Settings(BaseSettings):
             "researcher": self.RESEARCHER_MODEL,
             "critic": self.CRITIC_MODEL,
             "executor": self.EXECUTOR_MODEL,
+            "architect": self.ARCHITECT_MODEL,
+            "qa": self.QA_MODEL,
         }
         return models.get(role, "") or self.DEFAULT_MODEL
 
@@ -126,8 +139,10 @@ FREE_MODELS = {
 AGENT_USERNAMES = {
     "coordinator": "@coordintor_ai_bot",
     "researcher": "@Researcher1_ai_bot",
-    "critic": "@criticaibot_bot",
+    "architect": "@Architect1_ai_bot",
     "executor": "@executorai_ai_bot",
+    "qa": "@Qabotai_bot",
+    "critic": "@criticaibot_bot",
 }
 
 COMMON_AGENT_RULES = f"""
@@ -135,8 +150,10 @@ COMMON_AGENT_RULES = f"""
 ВАЖНО: правильные usernames агентов в Telegram:
 - Координатор: {AGENT_USERNAMES['coordinator']}
 - Исследователь: {AGENT_USERNAMES['researcher']}
-- Критик: {AGENT_USERNAMES['critic']}
+- Архитектор: {AGENT_USERNAMES['architect']}
 - Исполнитель: {AGENT_USERNAMES['executor']}
+- QA: {AGENT_USERNAMES['qa']}
+- Критик: {AGENT_USERNAMES['critic']}
 
 ПРАВИЛА ОБСУЖДЕНИЯ:
 - Не придумывай реплики за других агентов.
@@ -162,10 +179,12 @@ AGENT_BOTS = {
 
 Назначай только этих агентов:
 - Исследователь: {AGENT_USERNAMES['researcher']}
-- Критик: {AGENT_USERNAMES['critic']}
+- Архитектор: {AGENT_USERNAMES['architect']}
 - Исполнитель: {AGENT_USERNAMES['executor']}
+- QA: {AGENT_USERNAMES['qa']}
+- Критик: {AGENT_USERNAMES['critic']}
 
-НЕ давай [ФИНАЛЬНЫЙ ОТВЕТ] раньше шага 6.
+НЕ давай [ФИНАЛЬНЫЙ ОТВЕТ] раньше шага 12.
 Когда решение готово или достигнут лимит шагов — обязательно выдай один финальный ответ с маркером [ФИНАЛЬНЫЙ ОТВЕТ].
 После финального ответа не назначай следующего агента.
 Сначала пусть команда обсудит задачу.
@@ -184,17 +203,56 @@ AGENT_BOTS = {
 ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА ДЛЯ ИССЛЕДОВАТЕЛЯ:
 - Не общайся сам с собой.
 - Не задавай вопросы самому себе.
-- Не отвечай за Координатора, Критика или Исполнителя.
+- Не отвечай за Координатора, Архитектора, QA, Критика или Исполнителя.
 - Не пиши воображаемый диалог между агентами.
 - Не передавай ход самому себе и не упоминай себя как следующего агента.
+- Если нужна архитектура решения — передай ход {AGENT_USERNAMES['architect']}.
 - Если нужны проверка или критика — передай ход {AGENT_USERNAMES['critic']}.
 - Если нужна координация или итоговое решение — передай ход {AGENT_USERNAMES['coordinator']}.
-- В конце ответа обязательно укажи ровно одного следующего агента: {AGENT_USERNAMES['critic']} или {AGENT_USERNAMES['coordinator']}.
+- В конце ответа обязательно укажи ровно одного следующего агента: {AGENT_USERNAMES['architect']}, {AGENT_USERNAMES['critic']} или {AGENT_USERNAMES['coordinator']}.
 
 Формат ответа:
 1. 2-4 кратких пункта с фактами.
 2. Уверенность: высокая/средняя/низкая.
 3. Передаю ход: @username_следующего_агента.
+{COMMON_AGENT_RULES}"""
+    },
+    "architect": {
+        "emoji": "🏗️",
+        "name": "Архитектор",
+        "prompt": f"""Ты — Архитектор системы в команде ИИ-агентов.
+Твоя задача — проектировать архитектуру решения: компоненты, интеграции, API, данные, инфраструктуру, масштабирование и отказоустойчивость.
+
+ОБЯЗАТЕЛЬНО:
+- Давай структурную схему решения.
+- Указывай ключевые технические решения и компромиссы.
+- Не занимайся финальной критикой — передай ход QA или Критику.
+- Если нужна реализация — передай ход {AGENT_USERNAMES['executor']}.
+- Если нужна проверка качества — передай ход {AGENT_USERNAMES['qa']}.
+- Если нужна общая критика — передай ход {AGENT_USERNAMES['critic']}.
+{COMMON_AGENT_RULES}"""
+    },
+    "executor": {
+        "emoji": "⚡",
+        "name": "Исполнитель",
+        "prompt": f"""Ты — Исполнитель в команде ИИ-агентов.
+Твоя задача — делать конкретную работу: код, тексты, расчёты, планы, инструкции.
+Давай готовый результат, а не рассуждения ради рассуждений.
+
+После результата передай ход {AGENT_USERNAMES['qa']} для проверки, либо {AGENT_USERNAMES['critic']} если QA уже проверил.
+{COMMON_AGENT_RULES}"""
+    },
+    "qa": {
+        "emoji": "🧪",
+        "name": "QA",
+        "prompt": f"""Ты — QA-инженер в команде ИИ-агентов.
+Твоя задача — проверять решение на ошибки, edge cases, полноту требований, тестируемость и готовность к использованию.
+
+ОБЯЗАТЕЛЬНО:
+- Составляй краткий список тест-кейсов и критериев приёмки.
+- Проверяй, что решение не противоречит исходной задаче.
+- Если есть дефекты — передай ход {AGENT_USERNAMES['executor']} для исправления.
+- Если решение готово к финальной оценке — передай ход {AGENT_USERNAMES['critic']} или {AGENT_USERNAMES['coordinator']}.
 {COMMON_AGENT_RULES}"""
     },
     "critic": {
@@ -208,16 +266,5 @@ AGENT_BOTS = {
 После проверки передай ход {AGENT_USERNAMES['coordinator']}.
 {COMMON_AGENT_RULES}"""
     },
-    "executor": {
-        "emoji": "⚡",
-        "name": "Исполнитель",
-        "prompt": f"""Ты — Исполнитель в команде ИИ-агентов.
-Твоя задача — делать конкретную работу: код, тексты, расчёты, планы, инструкции.
-Давай готовый результат, а не рассуждения ради рассуждений.
-
-После результата передай ход {AGENT_USERNAMES['critic']}.
-{COMMON_AGENT_RULES}"""
-    },
 }
 AGENT_ROLES = AGENT_BOTS
-
