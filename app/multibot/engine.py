@@ -15,7 +15,7 @@ from app.db.crud import create_task, add_message, update_task_status, update_tas
 from app.db.models import TaskStatus
 
 logger = logging.getLogger(__name__)
-ROLE_ORDER = ["coordinator", "researcher", "critic", "executor"]
+ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
 FALLBACK_MODELS = [
     # Сначала Mistral напрямую — у пользователя есть MISTRAL_API_KEY.
     "mistral-small-latest",
@@ -42,19 +42,21 @@ def allowed_user_id(uid):
 
 
 AGENT_MENTIONS = {
-    "coordinator": ("@coordintor_ai_bot", "@coordinator_ai_bot"),  # второй — legacy-алиас для старых сообщений
+    "coordinator": ("@coordintor_ai_bot", "@coordinator_ai_bot"),
     "researcher": ("@researcher1_ai_bot",),
-    "critic": ("@criticaibot_bot",),
+    "architect": ("@architect1_ai_bot",),
     "executor": ("@executorai_ai_bot",),
+    "qa": ("@qabotai_bot",),
+    "critic": ("@criticaibot_bot",),
 }
-
 AGENT_NAME_PATTERNS = {
     "coordinator": (r"\bкоординатор(?:у|а|ом|е)?\b",),
     "researcher": (r"\bисследователь(?:ю|я|ем|е)?\b",),
-    "critic": (r"\bкритик(?:у|а|ом|е)?\b",),
+    "architect": (r"\bархитектор(?:у|а|ом|е)?\b|\barchitect\b",),
     "executor": (r"\bисполнитель(?:ю|я|ем|е)?\b",),
+    "qa": (r"\bqa\b|\bтестировщик(?:у|а|ом|е)?\b|\bтестер(?:у|а|ом|е)?\b",),
+    "critic": (r"\bкритик(?:у|а|ом|е)?\b",),
 }
-
 TURN_MARKERS = (
     "передаю", "передать", "передай", "слово", "следующий", "следующая",
     "пусть", "обратимся", "назначаю", "вызываю", "далее"
@@ -65,8 +67,10 @@ CORRECT_USERNAMES_PROMPT = """
 ВАЖНО: правильные usernames агентов в Telegram:
 - Координатор: @coordintor_ai_bot
 - Исследователь: @Researcher1_ai_bot
-- Критик: @criticaibot_bot
+- Архитектор: @Architect1_ai_bot
 - Исполнитель: @executorai_ai_bot
+- QA: @Qabotai_bot
+- Критик: @criticaibot_bot
 
 Не придумывай диалог за других агентов. Не задавай вопросы самому себе.
 В конце ответа, если обсуждение не завершено, передай ход ровно одному ДРУГОМУ агенту через его @username.
@@ -91,7 +95,7 @@ STRUCTURED_OUTPUT_PROMPT = """
 Схема:
 {
   "message": "текст сообщения, который увидит пользователь",
-  "next_agent": "coordinator|researcher|critic|executor|null",
+  "next_agent": "coordinator|researcher|architect|executor|qa|critic|null",
   "final": false
 }
 
@@ -145,7 +149,7 @@ def clean_feedback_text(text):
     for mentions in AGENT_MENTIONS.values():
         for mention in mentions:
             cleaned = re.sub(re.escape(mention), "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(r"^\s*(координатор|исследователь|критик|исполнитель)[\s,.:;!—-]+", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"^\s*(координатор|исследователь|архитектор|исполнитель|qa|тестировщик|критик)[\s,.:;!—-]+", "", cleaned, flags=re.IGNORECASE).strip()
     return cleaned or (text or "").strip()
 
 
@@ -254,8 +258,10 @@ def sanitize_visible_agent_message(message, current_role=None):
         names = {
             "coordinator": ["координатор", "@coordintor_ai_bot", "@coordinator_ai_bot"],
             "researcher": ["исследователь", "@researcher1_ai_bot"],
-            "critic": ["критик", "@criticaibot_bot"],
+            "architect": ["архитектор", "@architect1_ai_bot"],
             "executor": ["исполнитель", "@executorai_ai_bot"],
+            "qa": ["qa", "тестировщик", "тестер", "@qabotai_bot"],
+            "critic": ["критик", "@criticaibot_bot"],
         }.get(current_role, [])
         for name in names:
             msg = re.sub(rf"^\s*{re.escape(name)}\s*(?:\([^)]*\))?\s*[,：:;—-]+\s*", "", msg, flags=re.IGNORECASE)
@@ -382,6 +388,11 @@ def search_web(query):
     except Exception as e:
         logger.warning(f"Search error: {str(e)[:120]}")
         return ""
+
+
+def required_roles_before_final():
+    raw = getattr(settings, "REQUIRED_ROLES_BEFORE_FINAL", "researcher,architect,executor,qa,critic")
+    return [r.strip() for r in raw.split(",") if r.strip() and r.strip() in ROLE_ORDER]
 
 
 class AgentBot:
@@ -1047,14 +1058,18 @@ class AgentBot:
         username = {
             "coordinator": "@coordintor_ai_bot",
             "researcher": "@Researcher1_ai_bot",
-            "critic": "@criticaibot_bot",
+            "architect": "@Architect1_ai_bot",
             "executor": "@executorai_ai_bot",
+            "qa": "@Qabotai_bot",
+            "critic": "@criticaibot_bot",
         }.get(role, "")
         desc = {
             "coordinator": "управляет ходом обсуждения и финализирует ответ",
             "researcher": "ищет факты, делает краткий анализ, учитывает ваши поправки",
-            "critic": "проверяет логику, риски и слабые места",
+            "architect": "проектирует архитектуру, компоненты, API, данные и инфраструктуру",
             "executor": "делает практический результат: код, текст, план, расчёты",
+            "qa": "проверяет результат, тест-кейсы, edge cases и критерии приёмки",
+            "critic": "проверяет логику, риски и слабые места",
         }.get(role, "")
         btns = [
             [InlineKeyboardButton(text="🤖 Сменить модель", callback_data=f"pickagent:{role}")],
@@ -1400,9 +1415,13 @@ class AgentBot:
         # Защита от слишком ранней финализации: модель иногда ставит final=true уже на 2-3 шаге.
         final_requested = parsed_final or is_final_response(response)
         min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
+        roles_seen = await self._get_roles_seen(cid, tid)
+        required_roles = required_roles_before_final()
+        missing_roles = [r for r in required_roles if r not in roles_seen]
+        required_ok = not missing_roles
         final_allowed = (
             self.role == "coordinator" and (
-                step >= min_final_steps or bool(final_reason) or int(steps) >= max(0, ms - 1)
+                bool(final_reason) or int(steps) >= max(0, ms - 1) or (step >= min_final_steps and required_ok)
             )
         )
         if final_requested and not final_allowed:
