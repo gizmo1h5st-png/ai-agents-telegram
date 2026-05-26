@@ -67,8 +67,10 @@ async def lifespan(app: FastAPI):
         bots_config = {
             "coordinator": settings.BOT_COORDINATOR_TOKEN,
             "researcher": settings.BOT_RESEARCHER_TOKEN,
-            "critic": settings.BOT_CRITIC_TOKEN,
+            "architect": settings.BOT_ARCHITECT_TOKEN,
             "executor": settings.BOT_EXECUTOR_TOKEN,
+            "qa": settings.BOT_QA_TOKEN,
+            "critic": settings.BOT_CRITIC_TOKEN,
         }
 
         agent_bots = []
