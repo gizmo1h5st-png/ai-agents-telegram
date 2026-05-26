@@ -181,6 +181,29 @@ def strip_final_markers(text):
     return t.strip()
 
 
+def is_incomplete_final_response(text):
+    """True, если модель поставила финальный маркер, но по смыслу продолжает процесс."""
+    t = (text or "").lower()
+    markers = (
+        "требуется", "нужно", "необходимо", "осталось", "переходим",
+        "передаю", "требует", "финальное согласование", "этап валидации",
+        "валидац", "согласован", "уточнить", "доработать", "проверить",
+        "оставшимся", "оставшиеся", "следует"
+    )
+    if not any(m in t for m in markers):
+        return False
+    agent_mentioned = any(
+        m in t
+        for role in ROLE_ORDER if role != "coordinator"
+        for m in AGENT_MENTIONS.get(role, ())
+    ) or any(
+        str(AGENT_BOTS.get(role, {}).get("name", "")).lower() in t
+        for role in ROLE_ORDER if role != "coordinator"
+    )
+    hard = ("финальное согласование", "переходим", "этап валидации", "осталось", "оставшимся", "оставшиеся")
+    return agent_mentioned or any(h in t for h in hard)
+
+
 def _extract_json_object(raw):
     """Достаёт JSON-объект из ответа модели, даже если модель обернула его в ```json."""
     if not raw:
@@ -865,23 +888,33 @@ class AgentBot:
             await self.redis.delete(k)
 
     async def _get_roles_seen(self, cid, tid):
-        """Какие роли уже реально участвовали в обсуждении."""
+        """Какие роли реально участвовали как авторы сообщений, а не просто были упомянуты."""
         history = await self._get_history(cid, tid)
         seen = set()
+        sender_to_role = {}
+        for role in ROLE_ORDER:
+            cfg = AGENT_BOTS.get(role, {})
+            sender_to_role[role.lower()] = role
+            sender_to_role[str(cfg.get("name", "")).lower()] = role
+        sender_to_role.update({
+            "координатор": "coordinator",
+            "исследователь": "researcher",
+            "архитектор": "architect",
+            "исполнитель": "executor",
+            "qa": "qa",
+            "тестировщик": "qa",
+            "критик": "critic",
+        })
+
         for item in history:
-            content = (item.get("content") or "").lower()
-            for role in ROLE_ORDER:
-                cfg = AGENT_BOTS.get(role, {})
-                name = str(cfg.get("name", "")).lower()
-                emoji = str(cfg.get("emoji", ""))
-                mentions = [m.lower() for m in AGENT_MENTIONS.get(role, ())]
-                if (
-                    role in content
-                    or (name and name in content)
-                    or (emoji and emoji in content)
-                    or any(m in content for m in mentions)
-                ):
+            content = (item.get("content") or "").strip()
+            sender = content.split(":", 1)[0].strip().lower() if ":" in content else ""
+            sender_clean = re.sub(r"[^a-zа-яё]+", "", sender, flags=re.IGNORECASE)
+            for key, role in sender_to_role.items():
+                key_clean = re.sub(r"[^a-zа-яё]+", "", key, flags=re.IGNORECASE)
+                if key_clean and key_clean == sender_clean:
                     seen.add(role)
+                    break
         return seen
 
     async def _show_history(self, cid, message=None):
@@ -1439,19 +1472,28 @@ class AgentBot:
         required_roles = required_roles_before_final()
         missing_roles = [r for r in required_roles if r not in roles_seen]
         required_ok = not missing_roles
+        incomplete_final = final_requested and is_incomplete_final_response(response)
         final_allowed = (
-            self.role == "coordinator" and (
-                bool(final_reason) or int(steps) >= max(0, ms - 1) or (step >= min_final_steps and required_ok)
+            self.role == "coordinator" and not incomplete_final and (
+                bool(final_reason) or (int(steps) >= max(0, ms - 1) and required_ok) or (step >= min_final_steps and required_ok)
             )
         )
+        logger.info(f"Final gate: requested={final_requested}, allowed={final_allowed}, incomplete={incomplete_final}, seen={sorted(roles_seen)}, missing={missing_roles}")
         if final_requested and not final_allowed:
             logger.warning(
-                f"Early final blocked: role={self.role}, step={step}, min={min_final_steps}, task={tid}"
+                f"Early/incomplete final blocked: role={self.role}, step={step}, min={min_final_steps}, task={tid}, missing={missing_roles}, incomplete={incomplete_final}"
             )
             response = strip_final_markers(response)
             if not response:
                 response = "Пока рано завершать задачу. Продолжаю обсуждение и передаю ход дальше."
-            response += f"\n\n⚠️ Финализация пока рано: шаг {step}/{ms}. Продолжаем обсуждение."
+            if missing_roles:
+                response += f"\n\n⚠️ Финализация пока рано: не высказались обязательные роли: {', '.join(missing_roles)}."
+                parsed_next_agent = missing_roles[0]
+            elif incomplete_final:
+                response += "\n\n⚠️ Это ещё не финальный ответ: в сообщении есть признаки незавершённой проверки/валидации. Передаю ход дальше."
+                parsed_next_agent = detect_next_agent(response, current_role=self.role) or "qa"
+            else:
+                response += f"\n\n⚠️ Финализация пока рано: шаг {step}/{ms}. Продолжаем обсуждение."
             parsed_final = False
             if not parsed_next_agent or parsed_next_agent == self.role:
                 idx = ROLE_ORDER.index(self.role) if self.role in ROLE_ORDER else 0
