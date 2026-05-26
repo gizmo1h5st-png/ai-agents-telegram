@@ -418,6 +418,52 @@ def required_roles_before_final():
     return [r.strip() for r in raw.split(",") if r.strip() and r.strip() in ROLE_ORDER]
 
 
+PROMPT_VARIANTS = {
+    "coordinator": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Координируй спокойно: план → сбор фактов → реализация → проверка → финал. Не спеши с финалом."},
+        "deep": {"name": "🧠 Глубокий", "suffix": "Требуй от команды глубокий анализ, альтернативы, риски и аргументы. Финализируй только после QA и Критика."},
+        "fast": {"name": "⚡ Быстрый", "suffix": "Минимизируй круги обсуждения, но не пропускай обязательные роли активной команды. Итог краткий."},
+        "strict": {"name": "🧩 Строгий", "suffix": "Жёстко следи за порядком, активной командой, JSON-форматом и запретом раннего финала."},
+        "creative": {"name": "💡 Креатив", "suffix": "Поощряй нестандартные варианты, но проси Критика и QA отфильтровать рискованные идеи."},
+    },
+    "researcher": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Давай факты и краткие выводы без воды. Передавай архитектурные вопросы Архитектору."},
+        "deep": {"name": "🔬 Deep research", "suffix": "Ищи причины, ограничения, аналоги, неизвестные и риски. Явно отмечай уверенность и пробелы."},
+        "brief": {"name": "📝 Кратко", "suffix": "Отвечай максимум 3-5 пунктами. Только самое важное для следующего агента."},
+        "market": {"name": "📊 Рынок", "suffix": "Фокусируйся на аналогах, конкурентах, трендах, бизнес-контексте и практической применимости."},
+        "technical": {"name": "🛠 Техфакты", "suffix": "Фокусируйся на технических фактах, ограничениях, протоколах, API, инфраструктуре и данных."},
+    },
+    "architect": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Проектируй понятную архитектуру: компоненты, связи, данные, риски и компромиссы."},
+        "enterprise": {"name": "🏢 Enterprise", "suffix": "Думай как enterprise architect: безопасность, масштабирование, наблюдаемость, SLA, интеграции, сопровождение."},
+        "startup": {"name": "🚀 MVP", "suffix": "Проектируй MVP-архитектуру: быстро, дёшево, просто, с возможностью масштабирования позже."},
+        "cloud": {"name": "☁️ Cloud", "suffix": "Фокус на cloud-native: сервисы, очереди, кэш, БД, CI/CD, мониторинг, отказоустойчивость."},
+        "minimal": {"name": "📦 Минимализм", "suffix": "Предлагай максимально простую архитектуру без лишних компонентов. Обосновывай, что можно не делать."},
+    },
+    "executor": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Делай практичный результат: шаги, код, структуру, инструкции. После результата передай QA."},
+        "code": {"name": "💻 Код", "suffix": "Фокусируйся на коде, структурах файлов, командах запуска и конкретных фрагментах реализации."},
+        "plan": {"name": "📋 План", "suffix": "Давай пошаговый план реализации, чеклист и порядок внедрения."},
+        "ops": {"name": "⚙️ DevOps", "suffix": "Фокус на деплое, переменных окружения, Docker/Railway, логах, мониторинге и откате."},
+        "concise": {"name": "✂️ Кратко", "suffix": "Минимум рассуждений, максимум готового результата и команд."},
+    },
+    "qa": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Проверяй полноту, риски, edge cases и критерии приёмки. Давай короткий verdict."},
+        "strict": {"name": "🧪 Строгий QA", "suffix": "Будь придирчивым: ищи блокеры, непроверенные допущения, пропущенные требования и регрессии."},
+        "testcases": {"name": "✅ Тест-кейсы", "suffix": "Фокусируйся на тест-кейсах: positive, negative, edge, интеграционные и acceptance criteria."},
+        "security": {"name": "🛡 QA Security", "suffix": "Проверяй безопасность, доступы, секреты, утечки, abuse-cases и privacy."},
+        "ux": {"name": "👤 UX QA", "suffix": "Проверяй пользовательские сценарии, понятность, ошибки интерфейса и удобство эксплуатации."},
+    },
+    "critic": {
+        "balanced": {"name": "⚖️ Баланс", "suffix": "Проверяй логику, риски и слабые места. Давай конструктивные улучшения."},
+        "hard": {"name": "🔥 Жёсткий", "suffix": "Будь максимально строгим: ищи противоречия, слабые аргументы, завышенные обещания и скрытые риски."},
+        "business": {"name": "💼 Бизнес", "suffix": "Оцени ценность, стоимость, сроки, рынок, риски внедрения и ROI."},
+        "technical": {"name": "🛠 Техкритик", "suffix": "Фокусируйся на технической реализуемости, архитектурных долгах, производительности и поддержке."},
+        "finalcheck": {"name": "🏁 Финальная проверка", "suffix": "Проверяй готовность к финальному ответу: все ли роли высказались, нет ли открытых вопросов."},
+    },
+}
+
+
 class AgentBot:
     def __init__(self, role, token, redis_client):
         self.role = role
@@ -451,6 +497,8 @@ class AgentBot:
                 await self._show_model_picker(cid, cb.message)
             elif c == "agentmodel":
                 await self._show_agent_model_picker(cid, cb.message)
+            elif c == "agentprompts":
+                await self._show_agent_prompt_picker(cid, cb.message)
             elif c == "models":
                 await self._show_models_list(cid, cb.message)
             elif c == "config":
@@ -594,6 +642,41 @@ class AgentBot:
                 return
             await cb.answer("❌")
 
+        @self.router.callback_query(F.data.startswith("promptagent:"))
+        async def promptagent_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            r = cb.data.split(":", 1)[1]
+            if r not in AGENT_BOTS:
+                await cb.answer("❌")
+                return
+            await self._show_prompt_variants(cb.message.chat.id, r, cb.message)
+            await cb.answer()
+
+        @self.router.callback_query(F.data.startswith("setprompt:"))
+        async def setprompt_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            parts = cb.data.split(":")
+            if len(parts) != 3:
+                await cb.answer("❌")
+                return
+            r, key = parts[1], parts[2]
+            if r not in PROMPT_VARIANTS or key not in PROMPT_VARIANTS[r]:
+                await cb.answer("❌")
+                return
+            await self.redis.setex(f"prompt_variant:{cb.message.chat.id}:{r}", 86400 * 30, key)
+            variant = PROMPT_VARIANTS[r][key]
+            back = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад к промптам", callback_data=f"promptagent:{r}")],
+                [InlineKeyboardButton(text="📝 Все промпты", callback_data="cmd:agentprompts")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ])
+            await cb.message.edit_text(f"✅ {AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}\nПромпт: <b>{variant['name']}</b>", parse_mode="HTML", reply_markup=back)
+            await cb.answer("Промпт выбран")
+
         @self.router.callback_query(F.data.startswith("gm:"))
         async def gm_cb(cb: CallbackQuery):
             k = cb.data.split(":")[1]
@@ -707,6 +790,15 @@ class AgentBot:
             return gm.decode()
         return settings.get_agent_model(role)
 
+    async def _get_prompt_for_role(self, cid, role):
+        base = AGENT_BOTS[role]["prompt"]
+        raw = await self.redis.get(f"prompt_variant:{cid}:{role}")
+        key = raw.decode() if raw else "balanced"
+        variant = PROMPT_VARIANTS.get(role, {}).get(key) or PROMPT_VARIANTS.get(role, {}).get("balanced")
+        if variant:
+            return base + "\n\nДОПОЛНИТЕЛЬНЫЙ СТИЛЬ ПРОМПТА:\n" + variant["suffix"]
+        return base
+
     async def _get_delay(self, cid):
         v = await self.redis.get(f"delay:{cid}")
         return int(v) if v else settings.MIN_REPLY_INTERVAL
@@ -803,6 +895,9 @@ class AgentBot:
                 return
             if cmd == "/agentmodel":
                 await self._show_agent_model_picker(cid)
+                return
+            if cmd in ("/prompts", "/prompt"):
+                await self._show_agent_prompt_picker(cid)
                 return
             if cmd == "/team":
                 await self._show_team_picker(cid)
@@ -1149,8 +1244,8 @@ class AgentBot:
 
         btns = [
             [InlineKeyboardButton(text="👥 Команда", callback_data="cmd:team"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
-            [InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
-            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts"), InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents")],
+            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
             [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
@@ -1240,7 +1335,7 @@ class AgentBot:
             "critic": "проверяет логику, риски и слабые места",
         }.get(role, "")
         btns = [
-            [InlineKeyboardButton(text="🤖 Сменить модель", callback_data=f"pickagent:{role}")],
+            [InlineKeyboardButton(text="🤖 Сменить модель", callback_data=f"pickagent:{role}"), InlineKeyboardButton(text="📝 Промпт", callback_data=f"promptagent:{role}")],
             [InlineKeyboardButton(text="⬅️ Назад к агентам", callback_data="cmd:agents"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
         ]
         text = (
@@ -1315,6 +1410,30 @@ class AgentBot:
             ]),
             message=message,
         )
+
+    async def _show_agent_prompt_picker(self, cid, message=None):
+        btns = []
+        for r in ROLE_ORDER:
+            cfg = AGENT_BOTS[r]
+            raw = await self.redis.get(f"prompt_variant:{cid}:{r}")
+            key = raw.decode() if raw else "balanced"
+            vname = PROMPT_VARIANTS.get(r, {}).get(key, {}).get("name", key)
+            btns.append([InlineKeyboardButton(text=f"{cfg['emoji']} {cfg['name']}: {vname}", callback_data=f"promptagent:{r}")])
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        await self._send_or_edit(cid, "📝 <b>Промпты агентов</b>\n\nВыбери агента и стиль поведения:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_prompt_variants(self, cid, role, message=None):
+        cfg = AGENT_BOTS[role]
+        raw = await self.redis.get(f"prompt_variant:{cid}:{role}")
+        cur = raw.decode() if raw else "balanced"
+        btns = []
+        for key, variant in PROMPT_VARIANTS.get(role, {}).items():
+            mark = "✅ " if key == cur else ""
+            btns.append([InlineKeyboardButton(text=f"{mark}{variant['name']}", callback_data=f"setprompt:{role}:{key}")])
+        btns.append([InlineKeyboardButton(text="⬅️ Все промпты", callback_data="cmd:agentprompts")])
+        btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
+        text = f"{cfg['emoji']} <b>{cfg['name']}</b> — стиль промпта\n\nТекущий: <code>{cur}</code>"
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _show_model_picker(self, cid, message=None):
         gmr = await self.redis.get(f"global_model:{cid}")
@@ -1543,7 +1662,8 @@ class AgentBot:
             return
 
         step = steps + 1
-        prompt = self.config["prompt"] + CORRECT_USERNAMES_PROMPT + STRUCTURED_OUTPUT_PROMPT
+        prompt = await self._get_prompt_for_role(cid, self.role)
+        prompt += CORRECT_USERNAMES_PROMPT + STRUCTURED_OUTPUT_PROMPT
         ms = await self._get_max_steps(cid)
         team = await self._get_task_team(cid, tid)
         prompt += "\n\nАктивная команда для этой задачи: " + ", ".join([f"{r}={AGENT_BOTS[r]['name']}" for r in team])
