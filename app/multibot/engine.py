@@ -864,6 +864,26 @@ class AgentBot:
         if v and v.decode() == self.role:
             await self.redis.delete(k)
 
+    async def _get_roles_seen(self, cid, tid):
+        """Какие роли уже реально участвовали в обсуждении."""
+        history = await self._get_history(cid, tid)
+        seen = set()
+        for item in history:
+            content = (item.get("content") or "").lower()
+            for role in ROLE_ORDER:
+                cfg = AGENT_BOTS.get(role, {})
+                name = str(cfg.get("name", "")).lower()
+                emoji = str(cfg.get("emoji", ""))
+                mentions = [m.lower() for m in AGENT_MENTIONS.get(role, ())]
+                if (
+                    role in content
+                    or (name and name in content)
+                    or (emoji and emoji in content)
+                    or any(m in content for m in mentions)
+                ):
+                    seen.add(role)
+        return seen
+
     async def _show_history(self, cid, message=None):
         """Показывает последние задачи из Postgres."""
         try:
