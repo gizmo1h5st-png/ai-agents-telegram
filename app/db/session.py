@@ -17,8 +17,12 @@ async def init_db():
             for sql in [
                 "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model VARCHAR(200)",
                 "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tokens_used INTEGER DEFAULT 0",
+                "ALTER TABLE tasks ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT",
+                "ALTER TABLE tasks ALTER COLUMN user_id TYPE BIGINT USING user_id::BIGINT",
                 "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS team VARCHAR(500)",
                 "ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS agent_models TEXT",
+                "ALTER TABLE chat_settings ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT",
+                "ALTER TABLE agent_memory ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS msg_type VARCHAR(30) DEFAULT 'broadcast'",
                 "ALTER TABLE messages ADD COLUMN IF NOT EXISTS tokens INTEGER DEFAULT 0",
             ]:
