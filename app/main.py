@@ -29,23 +29,31 @@ async def lifespan(app: FastAPI):
         # Этот Redis-lock не даёт второму контейнеру запускать polling и ловить TelegramConflictError.
         instance_id = f"{os.environ.get('RAILWAY_DEPLOYMENT_ID', '')}:{uuid.uuid4()}"
         lock_key = "ai_agents_telegram:multi_bot_polling_lock"
-        lock_ttl = 90
+        lock_ttl = int(os.environ.get("POLLING_LOCK_TTL", "45"))
+        lock_wait = int(os.environ.get("POLLING_LOCK_WAIT", "180"))
         lock_acquired = False
         lock_refresher = None
 
-        for attempt in range(60):
+        # Emergency only: set CLEAR_POLLING_LOCK_ON_START=true once if Railway left a stale lock.
+        if os.environ.get("CLEAR_POLLING_LOCK_ON_START", "").lower() in ("1", "true", "yes"):
+            old_owner = await redis_client.get(lock_key)
+            await redis_client.delete(lock_key)
+            logger.warning(f"Polling lock force-cleared on start. old_owner={old_owner.decode() if old_owner else 'none'}")
+
+        for attempt in range(lock_wait):
             lock_acquired = bool(await redis_client.set(lock_key, instance_id, nx=True, ex=lock_ttl))
             if lock_acquired:
                 break
             owner = await redis_client.get(lock_key)
-            logger.warning(
-                f"Another bot polling instance is active. Waiting... attempt={attempt + 1}/60 owner={owner.decode() if owner else 'unknown'}"
-            )
+            if attempt == 0 or (attempt + 1) % 5 == 0:
+                logger.warning(
+                    f"Another bot polling instance is active. Waiting... attempt={attempt + 1}/{lock_wait} owner={owner.decode() if owner else 'unknown'}"
+                )
             await asyncio.sleep(1)
 
         async def refresh_lock():
             while True:
-                await asyncio.sleep(25)
+                await asyncio.sleep(max(10, lock_ttl // 3))
                 try:
                     owner = await redis_client.get(lock_key)
                     if owner and owner.decode() == instance_id:
