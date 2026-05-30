@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
     LLM_REQUEST_TIMEOUT: int = 60
     SUMMARIZER_MODEL: str = "mistral-small-latest"
+
+    # GitHub artifact publisher (D5)
+    GITHUB_TOKEN: str = ""
+    GITHUB_REPO: str = ""
+    GITHUB_BRANCH: str = "main"
+    GITHUB_BRANCH_MODE: str = "task"  # task | direct
+    GITHUB_AUTO_PUSH: bool = False
+    GITHUB_CREATE_PR: bool = False
+    GITHUB_ALLOWED_PREFIXES: str = "generated/,generated_code/,configs/,docs/,artifacts/"
+    GITHUB_COMMIT_AUTHOR_NAME: str = "AI Agents Bot"
+    GITHUB_COMMIT_AUTHOR_EMAIL: str = "ai-agents-bot@example.com"
     
     # Models per agent
     DEFAULT_MODEL: str = "mistral-small-latest"
