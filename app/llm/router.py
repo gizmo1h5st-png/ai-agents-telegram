@@ -186,6 +186,85 @@ def _extract_content(data: Dict[str, Any]) -> Optional[str]:
     return content.strip() if content else None
 
 
+def _finish_reason(data: Dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    return str(choices[0].get("finish_reason") or choices[0].get("finishReason") or "")
+
+
+def _looks_truncated(content: str) -> bool:
+    """Heuristic for providers that don't expose finish_reason reliably."""
+    if not content:
+        return False
+    t = content.rstrip()
+    # Unclosed code fence / JSON / FILE block are common truncation symptoms.
+    if t.count("```") % 2 == 1:
+        return True
+    if "[FILE:" in t and "```" in t and not t.endswith("```"):
+        return True
+    if t.endswith((",", "и", "или", "что", "который", "которые", "<", "</", "```html")):
+        return True
+    # Ends with no sentence/code-ish terminator after a long output.
+    if len(t) > 1000 and t[-1] not in ".!?。)]}>`\n":
+        return True
+    return False
+
+
+def _post_chat(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> httpx.Response:
+    with httpx.Client(timeout=settings.LLM_REQUEST_TIMEOUT) as client:
+        return client.post(url, headers=headers, json=payload)
+
+
+def _continue_content(url: str, headers: Dict[str, str], payload: Dict[str, Any], content: str, max_rounds: int) -> str:
+    """Ask the same model to continue if output was cut by max_tokens."""
+    combined = content or ""
+    rounds = max(0, int(max_rounds or 0))
+    if rounds <= 0:
+        return combined
+
+    messages = list(payload.get("messages") or [])
+    model = payload.get("model")
+    max_tokens = payload.get("max_tokens")
+    temperature = payload.get("temperature", 0.7)
+
+    for i in range(rounds):
+        cont_messages = [
+            *messages,
+            {"role": "assistant", "content": combined},
+            {
+                "role": "user",
+                "content": (
+                    "Продолжи ответ ровно с места обрыва. "
+                    "Не повторяй уже написанное. Если это блок кода или [FILE:], обязательно закрой его корректно."
+                ),
+            },
+        ]
+        cont_payload = {
+            "model": model,
+            "messages": cont_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        try:
+            resp = _post_chat(url, headers, cont_payload)
+            if resp.status_code != 200:
+                logger.warning(f"LLM continuation failed: status={resp.status_code}, body={resp.text[:160]}")
+                break
+            data = resp.json()
+            extra = _extract_content(data)
+            if not extra:
+                break
+            combined += "\n" + extra.strip()
+            fr = _finish_reason(data).lower()
+            if fr not in ("length", "max_tokens", "max_tokens_exceeded") and not _looks_truncated(extra):
+                break
+        except Exception as e:
+            logger.warning(f"LLM continuation exception: {str(e)[:160]}")
+            break
+    return combined
+
+
 def _models_to_try(preferred_model: str, fallback_models: List[str]) -> List[str]:
     result = []
     for m in [preferred_model] + list(fallback_models or []):
@@ -241,15 +320,26 @@ def call_llm_sync(
         }
 
         try:
-            with httpx.Client(timeout=settings.LLM_REQUEST_TIMEOUT) as client:
-                resp = client.post(url, headers=headers, json=payload)
+            resp = _post_chat(url, headers, payload)
 
             if resp.status_code == 200:
                 data = resp.json()
                 content = _extract_content(data)
                 if content:
+                    finish_reason = _finish_reason(data).lower()
+                    if finish_reason in ("length", "max_tokens", "max_tokens_exceeded") or _looks_truncated(content):
+                        logger.warning(
+                            f"LLM output may be truncated: provider={provider}, model={try_model}, finish_reason={finish_reason}, len={len(content)}"
+                        )
+                        content = _continue_content(
+                            url=url,
+                            headers=headers,
+                            payload=payload,
+                            content=content,
+                            max_rounds=getattr(settings, "LLM_CONTINUE_MAX", 2),
+                        )
                     _stat(provider, "success")
-                    logger.info(f"LLM success: provider={provider}, model={try_model}")
+                    logger.info(f"LLM success: provider={provider}, model={try_model}, finish_reason={finish_reason}")
                     if use_cache:
                         _cache_set(ck, content)
                     return content
