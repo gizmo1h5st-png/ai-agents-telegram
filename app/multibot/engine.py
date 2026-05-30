@@ -2113,6 +2113,42 @@ class AgentBot:
             except Exception:
                 pass
 
+    def _artifact_required_for_task(self, task_text, task_type):
+        t = (task_text or "").lower()
+        return task_type == "simple_artifact" or any(
+            x in t for x in ["[file:", "github", "push", "артефакт", "docs/", ".md", ".html", "generated_code"]
+        )
+
+    async def _handle_missing_required_artifact(self, cid, tid, td, reason="Нужен файл-артефакт, но /artifacts пуст."):
+        """Не закрывает файловую задачу без artifacts; возвращает ход Executor-у."""
+        retry_key = f"artifact_retry:{cid}:{tid}"
+        retries = await self.redis.incr(retry_key)
+        await self.redis.expire(retry_key, 7200)
+
+        if retries > 4:
+            await add_run_event(self.redis, cid, tid, "artifact_missing_failed", role=self.role, data={"retries": retries})
+            await self.bot.send_message(
+                cid,
+                "❌ Не удалось получить корректный [FILE] artifact после нескольких попыток. "
+                "Задача остановлена без GitHub push. Запусти новую задачу с явным форматом файла."
+            )
+            await self._complete_task(cid, tid, "❌ Задача остановлена: не удалось получить файл-артефакт.", "Artifact missing")
+            return
+
+        budget = await self._get_task_budget(cid, tid)
+        hard = int(budget.get("hard", await self._get_max_steps(cid)))
+        await self.redis.setex(f"steps:{cid}:{tid}", 7200, str(max(0, hard - 2)))
+        await self.redis.setex(f"turn:{cid}:{tid}", 600, "executor")
+        await self.redis.setex(f"pending:{cid}:executor", 300, f"{tid}:{td}")
+        await add_run_event(self.redis, cid, tid, "artifact_missing_retry", role=self.role, data={"retries": retries, "reason": reason})
+        await self.bot.send_message(
+            cid,
+            "⚠️ Нельзя завершить или пушить задачу: /artifacts пуст. "
+            "Возвращаю ход Исполнителю. Он должен прислать ПОЛНЫЙ файл строго в формате:\n\n"
+            "[FILE: docs/PROJECT_AUDIT.md]\n```md\n# Реальное содержимое файла\n```\n\n"
+            "Без пояснений вместо файла."
+        )
+
     async def _redirect_to_coordinator_for_final(self, cid, tid, td, reason="Достигнут лимит обсуждения."):
         """Передаёт финализацию координатору, если текущий агент не координатор."""
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
@@ -2139,6 +2175,10 @@ class AgentBot:
         prompt += "\n\nАктивная команда для этой задачи: " + ", ".join([f"{r}={AGENT_BOTS[r]['name']}" for r in team])
         prompt += f"\nТип задачи: {task_type}. Бюджет шагов: min={budget.get('min')} soft={budget.get('soft')} hard={budget.get('hard')}."
         prompt += "\nПередавай ход только агентам из активной команды."
+        if self.role in ("executor", "architect", "qa"):
+            prompt += "\n\nЕсли создаёшь файл для GitHub, используй формат: [FILE: generated_code/example.py] затем fenced code block. Разрешённые папки: generated/, generated_code/, configs/, docs/, artifacts/. Не создавай .env и секреты."
+        if self.role == "executor" and self._artifact_required_for_task(td, task_type):
+            prompt += "\n\nКРИТИЧЕСКИ ВАЖНО: эта задача требует файл-артефакт. Нельзя отвечать 'файл создан' или описанием. Верни ПОЛНЫЙ файл строго в формате [FILE: path] + ```lang code block```. Без этого задача не может быть завершена или запушена."
         context_block = read_context_files()
         if context_block:
             prompt += context_block
@@ -2210,7 +2250,7 @@ class AgentBot:
         stagnation = self._detect_stagnation(history_for_stagnation)
         hard_limit_reached = int(steps) >= max(0, ms - 1)
         soft_limit_reached = step >= soft_max_steps
-        artifact_required = task_type == "simple_artifact" or any(x in (td or "").lower() for x in ["[file:", "github", "push", "артефакт", "docs/", ".md", ".html", "generated_code"])
+        artifact_required = self._artifact_required_for_task(td, task_type)
         artifacts_present = await self._has_artifacts(cid, tid)
         no_required_artifact = artifact_required and not artifacts_present
         if no_required_artifact:
@@ -2253,6 +2293,15 @@ class AgentBot:
             await add_run_event(self.redis, cid, tid, "auto_finalized", role=self.role, data={"step": step, "type": task_type, "ready": ready})
             response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + strip_final_markers(response)
             parsed_final = True
+
+        if no_required_artifact and soft_limit_reached and self.role == "coordinator":
+            await self._handle_missing_required_artifact(cid, tid, td, "soft/hard limit reached but no artifact")
+            return
+
+        if self.role == "executor" and self._artifact_required_for_task(td, task_type) and "[FILE:" not in response:
+            await add_run_event(self.redis, cid, tid, "executor_no_file_marker", role=self.role, data={"step": step})
+            response += "\n\n⚠️ Для этой задачи требуется файл. Исполнитель должен вернуть не описание, а полный блок [FILE: path] + code block."
+            parsed_next_agent = "executor"
 
         if self.role in ("executor", "architect", "qa"):
             artifacts = extract_artifacts_from_text(response, role=self.role)
@@ -2306,6 +2355,9 @@ class AgentBot:
             return
 
         if int(new_steps) >= ms:
+            if self._artifact_required_for_task(td, task_type) and not await self._has_artifacts(cid, tid):
+                await self._handle_missing_required_artifact(cid, tid, td, "hard limit reached but no artifact")
+                return
             if self.role == "coordinator":
                 await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
             else:
@@ -2398,7 +2450,10 @@ class AgentBot:
                         continue
                     try:
                         if steps >= ms:
-                            if self.role == "coordinator":
+                            task_type = await self._get_task_type(cid, tid)
+                            if self._artifact_required_for_task(td, task_type) and not await self._has_artifacts(cid, tid):
+                                await self._handle_missing_required_artifact(cid, tid, td, "poll hard limit reached but no artifact")
+                            elif self.role == "coordinator":
                                 await self._force_finalize(cid, tid, td, "Достигнут лимит шагов обсуждения.")
                             else:
                                 await self._redirect_to_coordinator_for_final(cid, tid, td, "Достигнут лимит шагов обсуждения.")
