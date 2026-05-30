@@ -2259,7 +2259,18 @@ class AgentBot:
         await add_run_event(self.redis, cid, tid, "agent_message", role=self.role, data={"step": int(new_steps), "next": parsed_next_agent, "final": bool(parsed_final)})
         if (parsed_final or is_final_response(response)) and final_allowed:
             if settings.GITHUB_AUTO_PUSH:
-                await self._push_current_task(cid)
+                artifacts_before_push = await load_artifacts(self.redis, cid, tid)
+                if not artifacts_before_push:
+                    await self._recover_artifacts_from_history(cid, tid)
+                    artifacts_before_push = await load_artifacts(self.redis, cid, tid)
+                if artifacts_before_push:
+                    await self._push_current_task(cid)
+                else:
+                    await self.bot.send_message(
+                        cid,
+                        "⚠️ GitHub auto-push пропущен: в задаче нет сохранённых артефактов. "
+                        "Попроси Исполнителя выдать файл в формате [FILE: path] + code block, затем проверь /artifacts и выполни /push."
+                    )
             await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.", response)
             return
 
