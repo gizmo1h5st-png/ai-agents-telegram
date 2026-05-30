@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     MAX_DISCUSSION_STEPS: int = 50
     MIN_FINAL_STEPS: int = 12
     REQUIRED_ROLES_BEFORE_FINAL: str = "researcher,architect,executor,qa,critic"
+    DYNAMIC_STEPS_ENABLED: bool = True
+    AUTO_TEAM_BY_TASK_TYPE: bool = True
+    DEFAULT_TASK_TYPE: str = "general"
     IDLE_TIMEOUT_MINUTES: int = 10
 
     @property
