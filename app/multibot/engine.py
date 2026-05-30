@@ -940,6 +940,53 @@ class AgentBot:
         buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
         return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    def _split_telegram_text(self, text, limit=3900):
+        """Разбивает длинный текст на части под лимит Telegram 4096.
+
+        Режем по абзацам/строкам, а если строка слишком длинная — жёстко по limit.
+        3900 оставляет запас под префикс "часть X/Y".
+        """
+        text = str(text or "")
+        if len(text) <= limit:
+            return [text]
+
+        chunks = []
+        current = ""
+        paragraphs = text.split("\n")
+        for part in paragraphs:
+            candidate = part if not current else current + "\n" + part
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+                current = ""
+            while len(part) > limit:
+                cut = part.rfind(" ", 0, limit)
+                if cut < limit // 2:
+                    cut = limit
+                chunks.append(part[:cut].rstrip())
+                part = part[cut:].lstrip()
+            current = part
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def _send_long_message(self, cid, text, parse_mode=None, prefix_parts=True):
+        """Отправляет длинный текст несколькими Telegram-сообщениями без потери хвоста."""
+        chunks = self._split_telegram_text(text)
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
+            out = chunk
+            if prefix_parts and total > 1:
+                out = f"📄 Часть {i}/{total}\n\n{chunk}"
+            try:
+                await self.bot.send_message(cid, out, parse_mode=parse_mode)
+            except Exception:
+                await self.bot.send_message(cid, re.sub(r'<[^>]+>', '', out))
+            if total > 1:
+                await asyncio.sleep(0.3)
+
     async def _process_message(self, message: Message):
         cid = message.chat.id
         text = message.text or ""
@@ -1897,9 +1944,7 @@ class AgentBot:
                 response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + response
 
             msg = f"🎯 {response}"
-            if len(msg) > 4000:
-                msg = msg[:4000] + "..."
-            await self.bot.send_message(cid, msg)
+            await self._send_long_message(cid, msg)
             await self._save_message(cid, tid, "Координатор", msg)
             await self._complete_task(cid, tid, "✅ Завершено. Задача закрыта, дальнейшие ходы остановлены.", response)
         except Exception as e:
@@ -2035,14 +2080,12 @@ class AgentBot:
         msg = f"{self.config['emoji']} {response}"
         if sr:
             msg += sr
-        if len(msg) > 4000:
-            msg = msg[:4000] + "..."
         try:
-            await self.bot.send_message(cid, msg)
-        except:
+            await self._send_long_message(cid, msg)
+        except Exception:
             try:
-                await self.bot.send_message(cid, re.sub(r'<[^>]+>', '', msg))
-            except:
+                await self._send_long_message(cid, re.sub(r'<[^>]+>', '', msg))
+            except Exception:
                 pass
         delay = await self._get_delay(cid)
         await self.redis.setex(f"rate:{self.role}:{cid}", delay * 2, str(time.time()))
@@ -2095,7 +2138,7 @@ class AgentBot:
         try:
             dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
             if dbid:
-                await add_message(int(dbid.decode()), str(sender), str(text)[:4000], msg_type="multibot")
+                await add_message(int(dbid.decode()), str(sender), str(text), msg_type="multibot")
         except Exception as e:
             logger.warning(f"DB message save failed: {str(e)[:120]}")
 
