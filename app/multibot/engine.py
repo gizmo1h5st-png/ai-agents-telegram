@@ -15,6 +15,7 @@ from app.db.crud import create_task, add_message, update_task_status, update_tas
 from app.db.models import TaskStatus
 from app.run_journal import add_run_event, get_run_events, create_plan_for_team, save_run_plan, get_run_plan, mark_plan_role_done, format_plan, format_events
 from app.skills.loader import list_skills, select_skills_for_task, build_skills_context, read_context_files
+from app.memory.service import remember, list_chat_memories, search_chat_memories, clear_chat_memories, build_memory_context, save_task_lesson, format_memories
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -525,6 +526,8 @@ class AgentBot:
                 await self._show_status(cid, cb.message)
             elif c == "history":
                 await self._show_history(cid, cb.message)
+            elif c == "memory":
+                await self._show_memory(cid, cb.message)
             elif c == "events":
                 await self._show_events(cid, cb.message)
             elif c == "plan":
@@ -980,6 +983,32 @@ class AgentBot:
             if cmd in ("/history", "/last"):
                 await self._show_history(cid)
                 return
+            if cmd == "/memory":
+                await self._show_memory(cid)
+                return
+            if cmd.startswith("/remember"):
+                text_to_remember = text.replace("/remember", "", 1).strip()
+                if not text_to_remember:
+                    await self.bot.send_message(cid, "🧠 Использование: <code>/remember важный факт</code>", parse_mode="HTML")
+                    return
+                try:
+                    mem = await remember(cid, text_to_remember, category="manual")
+                    await self.bot.send_message(cid, f"✅ Запомнил: <code>{mem['value'][:500]}</code>", parse_mode="HTML")
+                except Exception as e:
+                    await self.bot.send_message(cid, f"❌ Не смог сохранить память: {str(e)[:120]}")
+                return
+            if cmd.startswith("/memory_search"):
+                q = text.replace("/memory_search", "", 1).strip()
+                if not q:
+                    await self.bot.send_message(cid, "🔎 Использование: <code>/memory_search запрос</code>", parse_mode="HTML")
+                    return
+                mems = await search_chat_memories(cid, q)
+                await self.bot.send_message(cid, format_memories(mems), parse_mode="HTML")
+                return
+            if cmd == "/forget":
+                await clear_chat_memories(cid)
+                await self.bot.send_message(cid, "🗑️ Память очищена.")
+                return
             if cmd == "/events":
                 await self._show_events(cid)
                 return
@@ -1195,6 +1224,16 @@ class AgentBot:
         btns = [[InlineKeyboardButton(text="🔄 Обновить", callback_data="cmd:events")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
+    async def _show_memory(self, cid, message=None):
+        mems = await list_chat_memories(cid, limit=20)
+        text = format_memories(mems)
+        text += "\n\n<code>/remember факт</code> — запомнить\n<code>/memory_search запрос</code> — поиск\n<code>/forget</code> — очистить"
+        btns = [
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="cmd:memory")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
     async def _show_history(self, cid, message=None):
         """Показывает последние задачи из Postgres."""
         try:
@@ -1342,11 +1381,12 @@ class AgentBot:
             [InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts"), InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents")],
             [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
             [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
+            [InlineKeyboardButton(text="🧠 Память", callback_data="cmd:memory"), InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills")],
             [InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan"), InlineKeyboardButton(text="📋 Events", callback_data="cmd:events")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
-            [InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills"), InlineKeyboardButton(text="📄 Context", callback_data="cmd:context")],
-            [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="📄 Context", callback_data="cmd:context"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers")],
             [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
         ]
@@ -1723,6 +1763,12 @@ class AgentBot:
                 await update_task_status(int(dbid.decode()), TaskStatus.COMPLETED, final_answer or completion_message)
         except Exception as e:
             logger.warning(f"DB task complete failed: {str(e)[:120]}")
+        try:
+            dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
+            lesson_task_id = int(dbid.decode()) if dbid else tid
+            await save_task_lesson(cid, lesson_task_id, final_answer)
+        except Exception as e:
+            logger.warning(f"Save task lesson failed: {str(e)[:120]}")
         await add_run_event(self.redis, cid, tid, "task_completed", role=self.role, data={"message": completion_message[:200] if completion_message else ""})
         await self._clear_task_runtime_keys(cid, tid)
         if completion_message:
@@ -1803,6 +1849,9 @@ class AgentBot:
         context_block = read_context_files()
         if context_block:
             prompt += context_block
+        memory_block = await build_memory_context(cid)
+        if memory_block:
+            prompt += memory_block
         raw_skills = await self.redis.get(f"task_skills:{cid}:{tid}")
         task_skills = json.loads(raw_skills.decode()) if raw_skills else []
         skills_block = build_skills_context(task_skills)
