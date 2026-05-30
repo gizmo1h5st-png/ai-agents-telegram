@@ -13,12 +13,12 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Supported formats:
-# [FILE: generated_code/example.py]
-# ```python
-# ...
-# ```
-#
-# Also supports imperfect model output where the closing ``` is missing.
+# 1) [FILE: generated_code/example.py]
+#    ```python
+#    ...
+#    ```
+# 2) same, but missing closing ```
+# 3) fallback: [FILE: path] followed by raw content without fences
 FILE_BLOCK_RE = re.compile(
     r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*?)```",
     re.MULTILINE,
@@ -26,6 +26,11 @@ FILE_BLOCK_RE = re.compile(
 
 FILE_BLOCK_UNCLOSED_RE = re.compile(
     r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*)$",
+    re.MULTILINE,
+)
+
+FILE_BLOCK_NO_FENCE_RE = re.compile(
+    r"\[FILE:\s*(?P<path>[^\]]+)\]\s*(?P<content>[\s\S]*?)(?=\n\s*\[FILE:|\Z)",
     re.MULTILINE,
 )
 
@@ -73,19 +78,32 @@ def validate_artifact_path(path: str) -> str:
     return str(p)
 
 
-def _normalize_artifact_content(content: str) -> str:
-    """Normalize content captured from Telegram/LLM output.
+def _looks_like_file_content(path: str, content: str) -> bool:
+    c = (content or "").strip()
+    if not c:
+        return False
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in {".html", ".htm"}:
+        return "<html" in html.unescape(c).lower() or "<!doctype" in html.unescape(c).lower()
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".md", ".css", ".txt"}:
+        return True
+    return len(c) > 5
 
-    Telegram copies often show HTML as &lt;...&gt;. For artifacts we want real file content.
-    Also removes accidental trailing prose after an unclosed code block when possible.
-    """
-    content = content or ""
-    content = html.unescape(content)
+
+def _normalize_artifact_content(content: str) -> str:
+    """Normalize content captured from Telegram/LLM output."""
+    content = html.unescape(content or "")
+
+    # Remove accidental leading language line in no-fence fallback.
+    lines = content.strip().splitlines()
+    if lines and lines[0].strip().lower() in {"html", "python", "py", "javascript", "js", "typescript", "ts", "json", "yaml", "yml", "css", "md", "markdown"}:
+        lines = lines[1:]
+        content = "\n".join(lines)
 
     # If model forgot closing fence and then continued with normal prose, cut common markers.
     stop_markers = [
-        "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель",
-        "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n\n```",
+        "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель", "\n\nКоординатор",
+        "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n```",
     ]
     cut_at = None
     for marker in stop_markers:
@@ -98,23 +116,34 @@ def _normalize_artifact_content(content: str) -> str:
     return content.strip() + "\n"
 
 
+def _overlaps(span: Tuple[int, int], spans: List[Tuple[int, int]]) -> bool:
+    return any(not (span[1] <= s[0] or span[0] >= s[1]) for s in spans)
+
+
 def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
-    """Return list of (path, content) from closed and unclosed FILE blocks."""
+    """Return list of (path, content) from closed/unclosed/no-fence FILE blocks."""
     text = text or ""
     matches: List[Tuple[str, str]] = []
-    spans = []
+    spans: List[Tuple[int, int]] = []
 
     for match in FILE_BLOCK_RE.finditer(text):
         matches.append((match.group("path"), match.group("content") or ""))
         spans.append(match.span())
 
-    # If there is no closed block for a [FILE:] occurrence, try unclosed fallback.
-    # This fixes common LLM output where final ``` is missing.
     for match in FILE_BLOCK_UNCLOSED_RE.finditer(text):
         span = match.span()
-        if any(not (span[1] <= s[0] or span[0] >= s[1]) for s in spans):
+        if _overlaps(span, spans):
             continue
         matches.append((match.group("path"), match.group("content") or ""))
+        spans.append(span)
+
+    # Last-resort fallback when model omitted ``` entirely.
+    for match in FILE_BLOCK_NO_FENCE_RE.finditer(text):
+        span = match.span()
+        if _overlaps(span, spans):
+            continue
+        matches.append((match.group("path"), match.group("content") or ""))
+        spans.append(span)
 
     return matches
 
@@ -131,25 +160,18 @@ def extract_artifacts_from_text(text: str, role: str) -> List[Artifact]:
             continue
 
         content = _normalize_artifact_content(raw_content)
-        if not content.strip():
+        if not _looks_like_file_content(safe_path, content):
+            logger.warning(f"Artifact ignored: {safe_path}, content does not look like file content")
             continue
         if len(content.encode("utf-8")) > MAX_ARTIFACT_BYTES:
             logger.warning(f"Artifact ignored: {safe_path} too large")
             continue
 
-        # One message may include duplicate path; keep the latest occurrence.
         if safe_path in seen_paths:
             artifacts = [a for a in artifacts if a.path != safe_path]
         seen_paths.add(safe_path)
 
-        artifacts.append(
-            Artifact(
-                path=safe_path,
-                content=content,
-                role=role,
-                created_at=time.time(),
-            )
-        )
+        artifacts.append(Artifact(path=safe_path, content=content, role=role, created_at=time.time()))
 
     if text and "[FILE:" in text and not artifacts:
         logger.warning("FILE marker detected, but no valid artifact extracted")
@@ -178,8 +200,6 @@ async def load_artifacts(redis, cid: int, tid: int) -> List[Artifact]:
     raw_items = await redis.lrange(key, 0, -1)
     artifacts: List[Artifact] = []
     seen = set()
-
-    # Latest version wins for duplicate paths.
     for raw in reversed(raw_items):
         try:
             data = json.loads(raw)
@@ -188,15 +208,7 @@ async def load_artifacts(redis, cid: int, tid: int) -> List[Artifact]:
                 continue
             seen.add(path)
             content = base64.b64decode(data["content_b64"]).decode("utf-8")
-            artifacts.append(
-                Artifact(
-                    path=path,
-                    content=content,
-                    role=data.get("role", "unknown"),
-                    created_at=data.get("created_at", time.time()),
-                    base_sha=data.get("base_sha"),
-                )
-            )
+            artifacts.append(Artifact(path=path, content=content, role=data.get("role", "unknown"), created_at=data.get("created_at", time.time()), base_sha=data.get("base_sha")))
         except Exception as e:
             logger.warning(f"Bad artifact record ignored: {str(e)[:120]}")
     return list(reversed(artifacts))
