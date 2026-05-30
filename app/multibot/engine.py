@@ -38,6 +38,43 @@ FALLBACK_MODELS = [
 SEARCH_CACHE = {}
 SEARCH_CACHE_TTL = 60 * 30
 
+TASK_STEP_BUDGETS = {
+    "simple_artifact": {"min": 3, "soft": 5, "hard": 8},
+    "simple_answer": {"min": 2, "soft": 4, "hard": 6},
+    "general": {"min": 5, "soft": 10, "hard": 16},
+    "research": {"min": 6, "soft": 12, "hard": 18},
+    "debug": {"min": 6, "soft": 12, "hard": 20},
+    "architecture": {"min": 10, "soft": 18, "hard": 28},
+}
+
+TASK_TEAMS = {
+    "simple_artifact": ["coordinator", "executor", "qa"],
+    "simple_answer": ["coordinator", "executor", "critic"],
+    "general": ["coordinator", "researcher", "executor", "critic"],
+    "research": ["coordinator", "researcher", "critic"],
+    "debug": ["coordinator", "researcher", "executor", "qa", "critic"],
+    "architecture": ["coordinator", "researcher", "architect", "executor", "qa", "critic"],
+}
+
+
+def classify_task(task: str) -> str:
+    t = (task or "").lower()
+    if any(x in t for x in ["создай файл", "создать файл", "подготовь файл", "generated_code", "[file:", "hello world", ".html", ".css", ".json", ".yaml", ".yml"]):
+        return "simple_artifact"
+    if any(x in t for x in ["коротко", "ответь", "объясни кратко", "простыми словами"]):
+        return "simple_answer"
+    if any(x in t for x in ["ошибка", "лог", "railway", "redis", "postgres", "telegramconflict", "не запускается", "падает", "debug"]):
+        return "debug"
+    if any(x in t for x in ["архитект", "спроектируй", "масштаб", "инфраструкт", "api", "saas", "микросервис"]):
+        return "architecture"
+    if any(x in t for x in ["найди", "исследуй", "рынок", "конкурент", "документац", "сравни"]):
+        return "research"
+    return getattr(settings, "DEFAULT_TASK_TYPE", "general") or "general"
+
+
+def budget_for_task_type(task_type: str) -> dict:
+    return TASK_STEP_BUDGETS.get(task_type, TASK_STEP_BUDGETS["general"])
+
 
 def allowed_user_id(uid):
     if uid is None:
@@ -913,6 +950,61 @@ class AgentBot:
         skills = [s for s in skills if s in list_skills()]
         await self.redis.setex(f"skills_enabled:{cid}", 86400 * 30, json.dumps(skills))
 
+    async def _get_task_type(self, cid, tid):
+        raw = await self.redis.get(f"task_type:{cid}:{tid}")
+        return raw.decode() if raw else getattr(settings, "DEFAULT_TASK_TYPE", "general")
+
+    async def _get_task_budget(self, cid, tid):
+        raw = await self.redis.get(f"step_budget:{cid}:{tid}")
+        if raw:
+            try:
+                return json.loads(raw.decode())
+            except Exception:
+                pass
+        return budget_for_task_type(await self._get_task_type(cid, tid))
+
+    async def _has_artifacts(self, cid, tid):
+        try:
+            artifacts = await load_artifacts(self.redis, cid, tid)
+            return bool(artifacts)
+        except Exception:
+            return False
+
+    def _detect_stagnation(self, history):
+        if len(history) < 4:
+            return False
+        normalized = []
+        for item in history[-4:]:
+            txt = re.sub(r"\s+", " ", (item.get("content") or "").lower())[:700]
+            txt = re.sub(r"[0-9]+", "#", txt)
+            normalized.append(txt)
+        return len(set(normalized)) <= 2
+
+    async def _task_readiness(self, cid, tid, task_type, team):
+        history = await self._get_history(cid, tid)
+        text = "\n".join([h.get("content", "") for h in history[-14:]]).lower()
+        roles_seen = await self._get_roles_seen(cid, tid)
+        has_artifact = "[file:" in text or await self._has_artifacts(cid, tid)
+        has_executor = "executor" in roles_seen or "executor" not in team
+        has_qa = "qa" in roles_seen or "qa" not in team
+        has_critic = "critic" in roles_seen or "critic" not in team
+
+        if task_type == "simple_artifact":
+            return has_artifact and (has_qa or has_critic)
+        if task_type == "simple_answer":
+            return has_executor or has_critic
+        if task_type == "debug":
+            has_cause = any(x in text for x in ["причина", "root cause", "ошибка", "лог", "симптом"])
+            has_fix = any(x in text for x in ["исправ", "решение", "fix", "сделать", "рекоменд"])
+            return has_cause and has_fix and (has_qa or has_critic)
+        if task_type == "architecture":
+            has_arch = "architect" in roles_seen or "architect" not in team
+            has_risks = any(x in text for x in ["риск", "огранич", "компромисс", "безопас"])
+            return has_arch and has_executor and (has_qa or has_critic) and has_risks
+        if task_type == "research":
+            return "researcher" in roles_seen and has_critic
+        return has_executor and (has_qa or has_critic)
+
     def _next_role_after(self, current_role, team):
         team = [r for r in team if r in ROLE_ORDER]
         if not team:
@@ -1398,7 +1490,10 @@ class AgentBot:
         td = task_raw.decode() if task_raw else ""
         sr = await self.redis.get(f"steps:{cid}:{tid}")
         steps = int(sr) if sr else 0
-        ms = await self._get_max_steps(cid)
+        task_type = await self._get_task_type(cid, tid)
+        budget = await self._get_task_budget(cid, tid)
+        ms = int(budget.get("hard", await self._get_max_steps(cid)))
+        ready = await self._task_readiness(cid, tid, task_type, await self._get_task_team(cid, tid))
         turn = await self.redis.get(f"turn:{cid}:{tid}")
         turn_s = turn.decode() if turn else "не задан"
         lock = await self.redis.get(f"lock:task:{cid}:{tid}")
@@ -1856,14 +1951,20 @@ class AgentBot:
         tid = int(time.time()) % 1000000
         await self.redis.setex(f"active_task:{cid}", 7200, str(tid))
         await self.redis.setex(f"task_desc:{cid}:{tid}", 7200, task)
+        task_type = classify_task(task) if getattr(settings, "DYNAMIC_STEPS_ENABLED", True) else "manual"
+        budget = budget_for_task_type(task_type)
         team = await self._get_team(cid)
+        if getattr(settings, "AUTO_TEAM_BY_TASK_TYPE", True) and task_type in TASK_TEAMS:
+            team = [r for r in TASK_TEAMS[task_type] if r in ROLE_ORDER]
+        await self.redis.setex(f"task_type:{cid}:{tid}", 7200, task_type)
+        await self.redis.setex(f"step_budget:{cid}:{tid}", 7200, json.dumps(budget))
         await self.redis.setex(f"task_team:{cid}:{tid}", 7200, json.dumps(team))
         plan = create_plan_for_team(task, team)
         await save_run_plan(self.redis, cid, tid, plan)
         enabled_skills = await self._get_enabled_skills(cid)
         task_skills = select_skills_for_task(task, enabled=enabled_skills)
         await self.redis.setex(f"task_skills:{cid}:{tid}", 7200, json.dumps(task_skills))
-        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200], "skills": task_skills})
+        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200], "skills": task_skills, "task_type": task_type, "budget": budget})
         await self.redis.set(f"steps:{cid}:{tid}", "0")
         await self.redis.expire(f"steps:{cid}:{tid}", 7200)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
@@ -1891,6 +1992,8 @@ class AgentBot:
         await self.redis.delete(f"lock:task:{cid}:{tid}")
         await self.redis.delete(f"db_task_id:{cid}:{tid}")
         await self.redis.delete(f"task_team:{cid}:{tid}")
+        await self.redis.delete(f"task_type:{cid}:{tid}")
+        await self.redis.delete(f"step_budget:{cid}:{tid}")
         await self.redis.delete(f"task_skills:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
@@ -1905,6 +2008,8 @@ class AgentBot:
             f"finalizing:{cid}:{tid}",
             f"lock:task:{cid}:{tid}",
             f"task_team:{cid}:{tid}",
+            f"task_type:{cid}:{tid}",
+            f"step_budget:{cid}:{tid}",
             f"task_skills:{cid}:{tid}",
         )
 
@@ -1993,9 +2098,13 @@ class AgentBot:
         step = steps + 1
         prompt = await self._get_prompt_for_role(cid, self.role)
         prompt += CORRECT_USERNAMES_PROMPT + STRUCTURED_OUTPUT_PROMPT
-        ms = await self._get_max_steps(cid)
         team = await self._get_task_team(cid, tid)
+        task_type = await self._get_task_type(cid, tid)
+        budget = await self._get_task_budget(cid, tid)
+        ms = int(budget.get("hard", await self._get_max_steps(cid)))
+        soft_max_steps = int(budget.get("soft", max(3, ms - 3)))
         prompt += "\n\nАктивная команда для этой задачи: " + ", ".join([f"{r}={AGENT_BOTS[r]['name']}" for r in team])
+        prompt += f"\nТип задачи: {task_type}. Бюджет шагов: min={budget.get('min')} soft={budget.get('soft')} hard={budget.get('hard')}."
         prompt += "\nПередавай ход только агентам из активной команды."
         context_block = read_context_files()
         if context_block:
@@ -2009,14 +2118,14 @@ class AgentBot:
         if skills_block:
             prompt += skills_block
 
-        min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
+        min_final_steps = int(budget.get("min", getattr(settings, "MIN_FINAL_STEPS", 6)))
         if step < min_final_steps:
             prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа. final=false. Не используй [ФИНАЛЬНЫЙ ОТВЕТ] до шага {min_final_steps}."
         elif self.role == "coordinator" and step < 5:
             prompt += f"\n\nШаг {step}/{ms}. РАНО для финального ответа."
-        elif self.role == "coordinator" and step >= max(6, ms - 2):
-            prompt += FINALIZATION_PROMPT
-        elif self.role == "coordinator" and step >= 6:
+        elif self.role == "coordinator" and step >= soft_max_steps:
+            prompt += "\n\nSOFT LIMIT достигнут. Если задача готова — финализируй. Если не готова — задай ровно один недостающий шаг одному агенту. Не запускай новый круг обсуждения."
+        elif self.role == "coordinator" and step >= max(6, min_final_steps):
             prompt += "\n\nЕсли данных уже достаточно, заверши обсуждение через [ФИНАЛЬНЫЙ ОТВЕТ]. Не растягивай диалог без необходимости."
 
         final_reason = await self.redis.get(f"final_reason:{cid}:{tid}")
@@ -2059,12 +2168,21 @@ class AgentBot:
         missing_roles = [r for r in required_roles if r not in roles_seen]
         required_ok = not missing_roles
         incomplete_final = final_requested and is_incomplete_final_response(response)
+        ready = await self._task_readiness(cid, tid, task_type, team)
+        history_for_stagnation = await self._get_history(cid, tid)
+        stagnation = self._detect_stagnation(history_for_stagnation)
+        hard_limit_reached = int(steps) >= max(0, ms - 1)
+        soft_limit_reached = step >= soft_max_steps
         final_allowed = (
             self.role == "coordinator" and not incomplete_final and (
-                bool(final_reason) or (int(steps) >= max(0, ms - 1) and required_ok) or (step >= min_final_steps and required_ok)
+                bool(final_reason)
+                or hard_limit_reached
+                or (step >= min_final_steps and ready)
+                or (soft_limit_reached and required_ok)
+                or (soft_limit_reached and stagnation)
             )
         )
-        logger.info(f"Final gate: requested={final_requested}, allowed={final_allowed}, incomplete={incomplete_final}, seen={sorted(roles_seen)}, missing={missing_roles}")
+        logger.info(f"Final gate: requested={final_requested}, allowed={final_allowed}, ready={ready}, stagnation={stagnation}, type={task_type}, budget={budget}, incomplete={incomplete_final}, seen={sorted(roles_seen)}, missing={missing_roles}")
         if final_requested and not final_allowed:
             logger.warning(
                 f"Early/incomplete final blocked: role={self.role}, step={step}, min={min_final_steps}, task={tid}, missing={missing_roles}, incomplete={incomplete_final}"
@@ -2210,7 +2328,8 @@ class AgentBot:
                     history = await self._get_history(cid, tid)
                     sr = await self.redis.get(f"steps:{cid}:{tid}")
                     steps = int(sr) if sr else 0
-                    ms = await self._get_max_steps(cid)
+                    budget = await self._get_task_budget(cid, tid)
+                    ms = int(budget.get("hard", await self._get_max_steps(cid)))
                     got_lock = await self._acquire_task_lock(cid, tid)
                     if not got_lock:
                         logger.info(f"Task lock busy: chat={cid}, task={tid}, role={self.role}")
