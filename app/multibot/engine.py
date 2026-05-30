@@ -16,6 +16,9 @@ from app.db.models import TaskStatus
 from app.run_journal import add_run_event, get_run_events, create_plan_for_team, save_run_plan, get_run_plan, mark_plan_role_done, format_plan, format_events
 from app.skills.loader import list_skills, select_skills_for_task, build_skills_context, read_context_files
 from app.memory.service import remember, list_chat_memories, search_chat_memories, clear_chat_memories, build_memory_context, save_task_lesson, format_memories
+from app.artifacts import extract_artifacts_from_text, save_artifacts, load_artifacts, clear_artifacts, format_artifacts
+from app.github_service import publish_task_artifacts
+from app.github_publisher import GitHubPublisherError, GitHubConflictError
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -530,6 +533,10 @@ class AgentBot:
                 await self._show_memory(cid, cb.message)
             elif c == "events":
                 await self._show_events(cid, cb.message)
+            elif c == "artifacts":
+                await self._show_artifacts(cid, cb.message)
+            elif c == "github":
+                await self._show_github_status(cid, cb.message)
             elif c == "plan":
                 await self._show_plan(cid, cb.message)
             await cb.answer()
@@ -572,6 +579,14 @@ class AgentBot:
             if action == "status":
                 await self._show_status(cid, cb.message)
                 await cb.answer()
+                return
+            if action == "artifacts":
+                await self._show_artifacts(cid, cb.message)
+                await cb.answer()
+                return
+            if action == "push":
+                await self._push_current_task(cid, cb.message)
+                await cb.answer("Push запущен")
                 return
 
             if action == "cleanup":
@@ -1012,6 +1027,15 @@ class AgentBot:
             if cmd == "/events":
                 await self._show_events(cid)
                 return
+            if cmd == "/artifacts":
+                await self._show_artifacts(cid)
+                return
+            if cmd == "/github":
+                await self._show_github_status(cid)
+                return
+            if cmd == "/push":
+                await self._push_current_task(cid)
+                return
             if cmd == "/plan":
                 await self._show_plan(cid)
                 return
@@ -1383,6 +1407,7 @@ class AgentBot:
             [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
             [InlineKeyboardButton(text="🧠 Память", callback_data="cmd:memory"), InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills")],
             [InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan"), InlineKeyboardButton(text="📋 Events", callback_data="cmd:events")],
+            [InlineKeyboardButton(text="📦 Артефакты", callback_data="cmd:artifacts"), InlineKeyboardButton(text="🚀 GitHub", callback_data="cmd:github")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
             [InlineKeyboardButton(text="📄 Context", callback_data="cmd:context"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
@@ -1507,6 +1532,67 @@ class AgentBot:
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
         ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_artifacts(self, cid, message=None):
+        tid = await self._get_active_tid(cid)
+        if not tid:
+            text = "📦 <b>Артефакты</b>\n\n📭 Нет активной задачи."
+            btns = [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+        else:
+            artifacts = await load_artifacts(self.redis, cid, tid)
+            text = format_artifacts(artifacts)
+            btns = [
+                [InlineKeyboardButton(text="🚀 Push в GitHub", callback_data="task:push")],
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data="task:artifacts")],
+                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+            ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_github_status(self, cid, message=None):
+        repo = settings.GITHUB_REPO or "not_set"
+        branch = settings.GITHUB_BRANCH or "main"
+        token = "set" if settings.GITHUB_TOKEN else "not_set"
+        text = (
+            "🚀 <b>GitHub Publisher</b>\n\n"
+            f"Repo: <code>{repo}</code>\n"
+            f"Base branch: <code>{branch}</code>\n"
+            f"Mode: <code>{settings.GITHUB_BRANCH_MODE}</code>\n"
+            f"Auto push: <code>{settings.GITHUB_AUTO_PUSH}</code>\n"
+            f"Create PR: <code>{settings.GITHUB_CREATE_PR}</code>\n"
+            f"Token: <code>{token}</code>\n\n"
+            "Команды: <code>/artifacts</code>, <code>/push</code>"
+        )
+        btns = [[InlineKeyboardButton(text="📦 Артефакты", callback_data="cmd:artifacts")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _push_current_task(self, cid, message=None):
+        active = await self.redis.get(f"active_task:{cid}")
+        if not active:
+            text = "📭 Нет активной задачи для push."
+            if message:
+                await self._send_or_edit(cid, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]), message=message)
+            else:
+                await self.bot.send_message(cid, text)
+            return
+        tid = int(active.decode())
+        try:
+            dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
+            db_task_id = int(dbid.decode()) if dbid else None
+            result = await publish_task_artifacts(self.redis, cid, tid, db_task_id=db_task_id, role="Executor")
+            text = f"✅ GitHub push выполнен.\nBranch: <code>{result['branch']}</code>\nCommit: {result['commit_url']}"
+            if result.get("pr_url"):
+                text += f"\nPR: {result['pr_url']}"
+            await add_run_event(self.redis, cid, tid, "github_push", role="executor", data={"branch": result["branch"], "files": result["files"]})
+        except GitHubConflictError as e:
+            text = f"⚠️ GitHub conflict: <code>{str(e)[:500]}</code>\nНичего не затираю."
+        except GitHubPublisherError as e:
+            text = f"⚠️ GitHub push failed: <code>{str(e)[:500]}</code>"
+        except Exception as e:
+            text = f"❌ Unexpected GitHub push error: <code>{str(e)[:500]}</code>"
+        if message:
+            await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 Артефакты", callback_data="cmd:artifacts"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]), message=message)
+        else:
+            await self.bot.send_message(cid, text, parse_mode="HTML")
 
     async def _show_skills(self, cid, message=None):
         enabled = set(await self._get_enabled_skills(cid))
@@ -1934,6 +2020,13 @@ class AgentBot:
             if not parsed_next_agent or parsed_next_agent == self.role:
                 parsed_next_agent = self._next_role_after(self.role, team)
 
+        if self.role in ("executor", "architect", "qa"):
+            artifacts = extract_artifacts_from_text(response, role=self.role)
+            if artifacts:
+                await save_artifacts(self.redis, cid, tid, artifacts)
+                await add_run_event(self.redis, cid, tid, "artifacts_saved", role=self.role, data={"count": len(artifacts), "files": [a.path for a in artifacts]})
+                await self.bot.send_message(cid, f"📦 Найдено артефактов для GitHub: {len(artifacts)}")
+
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
             r = await asyncio.to_thread(search_web, q)
@@ -1964,6 +2057,8 @@ class AgentBot:
         await mark_plan_role_done(self.redis, cid, tid, self.role)
         await add_run_event(self.redis, cid, tid, "agent_message", role=self.role, data={"step": int(new_steps), "next": parsed_next_agent, "final": bool(parsed_final)})
         if (parsed_final or is_final_response(response)) and final_allowed:
+            if settings.GITHUB_AUTO_PUSH:
+                await self._push_current_task(cid)
             await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.", response)
             return
 
