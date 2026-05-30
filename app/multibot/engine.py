@@ -59,7 +59,7 @@ TASK_TEAMS = {
 
 def classify_task(task: str) -> str:
     t = (task or "").lower()
-    if any(x in t for x in ["создай файл", "создать файл", "подготовь файл", "generated_code", "[file:", "hello world", ".html", ".css", ".json", ".yaml", ".yml"]):
+    if any(x in t for x in ["создай файл", "создать файл", "подготовь файл", "сгенерируй файл", "перезаписать", "перезапиши", "generated_code", "[file:", "github", "push", "артефакт", "docs/", ".md", ".html", ".css", ".json", ".yaml", ".yml", "hello world"]):
         return "simple_artifact"
     if any(x in t for x in ["коротко", "ответь", "объясни кратко", "простыми словами"]):
         return "simple_answer"
@@ -230,7 +230,8 @@ def is_incomplete_final_response(text):
     markers = (
         "требуется", "нужно", "необходимо", "осталось", "переходим",
         "передаю", "требует", "финальное согласование", "этап валидации",
-        "валидац", "согласован", "уточнить", "доработать", "проверить",
+        "валидац", "согласован", "уточнить", "уточни", "подтверди",
+        "доработать", "проверить", "проверь", "выполни", "предоставь",
         "оставшимся", "оставшиеся", "следует"
     )
     if not any(m in t for m in markers):
@@ -245,6 +246,24 @@ def is_incomplete_final_response(text):
     )
     hard = ("финальное согласование", "переходим", "этап валидации", "осталось", "оставшимся", "оставшиеся")
     return agent_mentioned or any(h in t for h in hard)
+
+
+def asks_another_agent_to_continue(text, current_role="coordinator"):
+    """Detects pseudo-final answers that actually delegate work to another agent."""
+    t = (text or "").lower()
+    action_words = (
+        "подтверди", "уточни", "проверь", "выполни", "сделай", "предоставь",
+        "проанализируй", "оцени", "передаю", "переходим", "нужно", "требуется",
+        "запроси", "исправь", "доработай", "валидируй", "проведи"
+    )
+    if not any(w in t for w in action_words):
+        return False
+    for role in ROLE_ORDER:
+        if role == current_role:
+            continue
+        if any(m in t for m in AGENT_MENTIONS.get(role, ())) or str(AGENT_BOTS.get(role, {}).get("name", "")).lower() in t:
+            return True
+    return False
 
 
 def _extract_json_object(raw):
@@ -2181,14 +2200,23 @@ class AgentBot:
         required_roles = [r for r in required_roles_before_final() if r in team]
         missing_roles = [r for r in required_roles if r not in roles_seen]
         required_ok = not missing_roles
-        incomplete_final = final_requested and is_incomplete_final_response(response)
+        incomplete_final = final_requested and (
+            is_incomplete_final_response(response)
+            or asks_another_agent_to_continue(response, current_role=self.role)
+            or bool(parsed_next_agent)
+        )
         ready = await self._task_readiness(cid, tid, task_type, team)
         history_for_stagnation = await self._get_history(cid, tid)
         stagnation = self._detect_stagnation(history_for_stagnation)
         hard_limit_reached = int(steps) >= max(0, ms - 1)
         soft_limit_reached = step >= soft_max_steps
+        artifact_required = task_type == "simple_artifact" or any(x in (td or "").lower() for x in ["[file:", "github", "push", "артефакт", "docs/", ".md", ".html", "generated_code"])
+        artifacts_present = await self._has_artifacts(cid, tid)
+        no_required_artifact = artifact_required and not artifacts_present
+        if no_required_artifact:
+            logger.info(f"Final blocked: artifact required but missing, task={tid}, type={task_type}")
         final_allowed = (
-            self.role == "coordinator" and not incomplete_final and (
+            self.role == "coordinator" and not incomplete_final and not no_required_artifact and (
                 bool(final_reason)
                 or hard_limit_reached
                 or (step >= min_final_steps and ready)
@@ -2205,7 +2233,10 @@ class AgentBot:
             response = strip_final_markers(response)
             if not response:
                 response = "Пока рано завершать задачу. Продолжаю обсуждение и передаю ход дальше."
-            if missing_roles:
+            if no_required_artifact:
+                response += "\n\n⚠️ Финализация пока невозможна: задача требует файл/артефакт, но в /artifacts ничего не сохранено. Исполнитель должен выдать файл строго в формате [FILE: path] + code block."
+                parsed_next_agent = "executor" if "executor" in team else self._next_role_after(self.role, team)
+            elif missing_roles:
                 response += f"\n\n⚠️ Финализация пока рано: не высказались обязательные роли: {', '.join(missing_roles)}."
                 parsed_next_agent = missing_roles[0]
             elif incomplete_final:
