@@ -14,6 +14,7 @@ from app.llm.router import call_llm_sync, get_provider_for_model, get_llm_router
 from app.db.crud import create_task, add_message, update_task_status, update_task
 from app.db.models import TaskStatus
 from app.run_journal import add_run_event, get_run_events, create_plan_for_team, save_run_plan, get_run_plan, mark_plan_role_done, format_plan, format_events
+from app.skills.loader import list_skills, select_skills_for_task, build_skills_context, read_context_files
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -510,6 +511,10 @@ class AgentBot:
                 await self._show_team_picker(cid, cb.message)
             elif c == "providers":
                 await self._show_providers_help(cid, cb.message)
+            elif c == "skills":
+                await self._show_skills(cid, cb.message)
+            elif c == "context":
+                await self._show_context(cid, cb.message)
             elif c == "help":
                 await self._show_help(cid, cb.message)
             elif c == "steps":
@@ -644,6 +649,39 @@ class AgentBot:
                 await self._set_team(cid, list(presets[action]))
                 await self._show_team_picker(cid, cb.message)
                 await cb.answer("Пресет выбран")
+                return
+            await cb.answer("❌")
+
+        @self.router.callback_query(F.data.startswith("skill:"))
+        async def skill_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
+                return
+            cid = cb.message.chat.id
+            action = cb.data.split(":", 1)[1]
+            if action.startswith("toggle:"):
+                sid = action.split(":", 1)[1]
+                skills = await self._get_enabled_skills(cid)
+                if sid in skills:
+                    skills.remove(sid)
+                else:
+                    skills.append(sid)
+                await self._set_enabled_skills(cid, skills)
+                await self._show_skills(cid, cb.message)
+                await cb.answer("Skills обновлены")
+                return
+            if action == "all":
+                await self._set_enabled_skills(cid, list(list_skills().keys()))
+                await self._show_skills(cid, cb.message)
+                await cb.answer("Все skills включены")
+                return
+            if action == "none":
+                await self._set_enabled_skills(cid, [])
+                await self._show_skills(cid, cb.message)
+                await cb.answer("Skills выключены")
                 return
             await cb.answer("❌")
 
@@ -843,6 +881,20 @@ class AgentBot:
                 pass
         return await self._get_team(cid)
 
+    async def _get_enabled_skills(self, cid):
+        raw = await self.redis.get(f"skills_enabled:{cid}")
+        all_ids = list(list_skills().keys())
+        if raw is None:
+            return all_ids
+        try:
+            return [x for x in json.loads(raw.decode()) if x in all_ids]
+        except Exception:
+            return all_ids
+
+    async def _set_enabled_skills(self, cid, skills):
+        skills = [s for s in skills if s in list_skills()]
+        await self.redis.setex(f"skills_enabled:{cid}", 86400 * 30, json.dumps(skills))
+
     def _next_role_after(self, current_role, team):
         team = [r for r in team if r in ROLE_ORDER]
         if not team:
@@ -933,6 +985,12 @@ class AgentBot:
                 return
             if cmd == "/plan":
                 await self._show_plan(cid)
+                return
+            if cmd == "/skills":
+                await self._show_skills(cid)
+                return
+            if cmd == "/context":
+                await self._show_context(cid)
                 return
             if cmd == "/cleanup":
                 deleted = await self._cleanup_chat_runtime(cid)
@@ -1287,6 +1345,7 @@ class AgentBot:
             [InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan"), InlineKeyboardButton(text="📋 Events", callback_data="cmd:events")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
+            [InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills"), InlineKeyboardButton(text="📄 Context", callback_data="cmd:context")],
             [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
             [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
@@ -1407,6 +1466,32 @@ class AgentBot:
             [InlineKeyboardButton(text="👥 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
         ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_skills(self, cid, message=None):
+        enabled = set(await self._get_enabled_skills(cid))
+        registry = list_skills()
+        lines = ["🧩 <b>Skills</b>", "", "Skills автоматически подмешиваются в prompt по тексту задачи."]
+        btns = []
+        for sid, meta in registry.items():
+            mark = "✅" if sid in enabled else "☐"
+            btns.append([InlineKeyboardButton(text=f"{mark} {meta['name']}", callback_data=f"skill:toggle:{sid}")])
+        btns += [
+            [InlineKeyboardButton(text="✅ Включить все", callback_data="skill:all"), InlineKeyboardButton(text="☐ Выключить все", callback_data="skill:none")],
+            [InlineKeyboardButton(text="📄 Контекст", callback_data="cmd:context"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, "\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_context(self, cid, message=None):
+        ctx = read_context_files()
+        text = "📄 <b>Context Files</b>\n\n"
+        if ctx:
+            clean = re.sub(r"<[^>]+>", "", ctx)
+            clean = clean.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            text += f"<code>{clean[:3200]}</code>"
+        else:
+            text += "Контекстные файлы не найдены."
+        btns = [[InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _show_providers_help(self, cid, message=None):
@@ -1582,7 +1667,10 @@ class AgentBot:
         await self.redis.setex(f"task_team:{cid}:{tid}", 7200, json.dumps(team))
         plan = create_plan_for_team(task, team)
         await save_run_plan(self.redis, cid, tid, plan)
-        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200]})
+        enabled_skills = await self._get_enabled_skills(cid)
+        task_skills = select_skills_for_task(task, enabled=enabled_skills)
+        await self.redis.setex(f"task_skills:{cid}:{tid}", 7200, json.dumps(task_skills))
+        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200], "skills": task_skills})
         await self.redis.set(f"steps:{cid}:{tid}", "0")
         await self.redis.expire(f"steps:{cid}:{tid}", 7200)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
@@ -1610,6 +1698,7 @@ class AgentBot:
         await self.redis.delete(f"lock:task:{cid}:{tid}")
         await self.redis.delete(f"db_task_id:{cid}:{tid}")
         await self.redis.delete(f"task_team:{cid}:{tid}")
+        await self.redis.delete(f"task_skills:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
             await self.redis.delete(f"rate:{role}:{cid}")
@@ -1623,6 +1712,7 @@ class AgentBot:
             f"finalizing:{cid}:{tid}",
             f"lock:task:{cid}:{tid}",
             f"task_team:{cid}:{tid}",
+            f"task_skills:{cid}:{tid}",
         )
 
     async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены.", final_answer=None):
@@ -1710,6 +1800,14 @@ class AgentBot:
         team = await self._get_task_team(cid, tid)
         prompt += "\n\nАктивная команда для этой задачи: " + ", ".join([f"{r}={AGENT_BOTS[r]['name']}" for r in team])
         prompt += "\nПередавай ход только агентам из активной команды."
+        context_block = read_context_files()
+        if context_block:
+            prompt += context_block
+        raw_skills = await self.redis.get(f"task_skills:{cid}:{tid}")
+        task_skills = json.loads(raw_skills.decode()) if raw_skills else []
+        skills_block = build_skills_context(task_skills)
+        if skills_block:
+            prompt += skills_block
 
         min_final_steps = getattr(settings, "MIN_FINAL_STEPS", 6)
         if step < min_final_steps:
