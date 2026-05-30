@@ -1587,6 +1587,26 @@ class AgentBot:
             btns = [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
         else:
             artifacts = await load_artifacts(self.redis, cid, tid)
+
+            # Backfill: if old parser missed artifacts, scan recent Redis history now.
+            if not artifacts:
+                recovered = []
+                history = await self._get_history(cid, tid)
+                for item in history:
+                    content = item.get("content") or ""
+                    role = "unknown"
+                    if ":" in content:
+                        sender = content.split(":", 1)[0].lower()
+                        for r, cfg in AGENT_BOTS.items():
+                            if r in sender or str(cfg.get("name", "")).lower() in sender:
+                                role = r
+                                break
+                    recovered.extend(extract_artifacts_from_text(content, role=role))
+                if recovered:
+                    await save_artifacts(self.redis, cid, tid, recovered)
+                    artifacts = await load_artifacts(self.redis, cid, tid)
+                    await add_run_event(self.redis, cid, tid, "artifacts_recovered", role="system", data={"count": len(recovered), "files": [a.path for a in recovered]})
+
             text = format_artifacts(artifacts)
             btns = [
                 [InlineKeyboardButton(text="🚀 Push в GitHub", callback_data="task:push")],
