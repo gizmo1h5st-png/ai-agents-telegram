@@ -12,13 +12,15 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Supported formats:
+# Supported safe formats:
 # 1) [FILE: generated_code/example.py]
 #    ```python
 #    ...
 #    ```
 # 2) same, but missing closing ```
-# 3) fallback: [FILE: path] followed by raw content without fences
+#
+# No-fence fallback is intentionally disabled by default because it can capture
+# user prompts / feedback instructions as a file body.
 FILE_BLOCK_RE = re.compile(
     r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*?)```",
     re.MULTILINE,
@@ -52,6 +54,11 @@ def _allowed_prefixes() -> list[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _allow_unfenced_artifacts() -> bool:
+    # Default False: safer. Enable only if you really want [FILE:] without ``` fences.
+    return bool(getattr(settings, "GITHUB_ALLOW_UNFENCED_ARTIFACTS", False))
+
+
 def validate_artifact_path(path: str) -> str:
     path = (path or "").strip().replace("\\", "/")
     if not path:
@@ -82,12 +89,45 @@ def _looks_like_file_content(path: str, content: str) -> bool:
     c = (content or "").strip()
     if not c:
         return False
+    if _is_placeholder_or_prompt_leak(c):
+        return False
+
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in {".html", ".htm"}:
-        return "<html" in html.unescape(c).lower() or "<!doctype" in html.unescape(c).lower()
-    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".md", ".css", ".txt"}:
+        unescaped = html.unescape(c).lower()
+        return "<html" in unescaped or "<!doctype" in unescaped
+    if suffix == ".md":
+        # Require at least a real heading/list/content, not just "..." or prompt residue.
+        return ("#" in c or "- " in c or len(c) > 120) and "..." != c.replace("\n", "").strip()
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".css", ".txt"}:
         return True
     return len(c) > 5
+
+
+def _is_placeholder_or_prompt_leak(content: str) -> bool:
+    c = (content or "").strip()
+    lower = c.lower()
+
+    # Placeholder-only / low-value body.
+    compact = re.sub(r"\s+", "", lower)
+    if compact in {"...", "…", "todo", "tbd", "projectaudit..."}:
+        return True
+    if re.fullmatch(r"[#\s]*project audit\s*(\.\.\.|…)?", lower, flags=re.IGNORECASE):
+        return True
+
+    # Prompt / feedback leakage. These must never be committed as artifacts.
+    forbidden_fragments = [
+        "инструкция агенту:",
+        "обязательно учти это замечание",
+        "пересмотри свой предыдущий вывод",
+        "не спорь ради спора",
+        "без изменения других файлов.",
+        "executor обязан выдать",
+        "формат ответа",
+        "не меняйте код.",
+        "не изменяйте кодовые файлы",
+    ]
+    return any(x in lower for x in forbidden_fragments)
 
 
 def _normalize_artifact_content(content: str) -> str:
@@ -104,6 +144,8 @@ def _normalize_artifact_content(content: str) -> str:
     stop_markers = [
         "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель", "\n\nКоординатор",
         "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n```",
+        "\n\nИнструкция агенту:", "\nИнструкция агенту:",
+        "\n\nБез изменения других файлов", "\nБез изменения других файлов",
     ]
     cut_at = None
     for marker in stop_markers:
@@ -121,7 +163,7 @@ def _overlaps(span: Tuple[int, int], spans: List[Tuple[int, int]]) -> bool:
 
 
 def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
-    """Return list of (path, content) from closed/unclosed/no-fence FILE blocks."""
+    """Return list of (path, content) from closed/unclosed FILE blocks."""
     text = text or ""
     matches: List[Tuple[str, str]] = []
     spans: List[Tuple[int, int]] = []
@@ -137,13 +179,14 @@ def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
         matches.append((match.group("path"), match.group("content") or ""))
         spans.append(span)
 
-    # Last-resort fallback when model omitted ``` entirely.
-    for match in FILE_BLOCK_NO_FENCE_RE.finditer(text):
-        span = match.span()
-        if _overlaps(span, spans):
-            continue
-        matches.append((match.group("path"), match.group("content") or ""))
-        spans.append(span)
+    # Last-resort fallback when model omitted ``` entirely. Disabled by default.
+    if _allow_unfenced_artifacts():
+        for match in FILE_BLOCK_NO_FENCE_RE.finditer(text):
+            span = match.span()
+            if _overlaps(span, spans):
+                continue
+            matches.append((match.group("path"), match.group("content") or ""))
+            spans.append(span)
 
     return matches
 
@@ -161,7 +204,7 @@ def extract_artifacts_from_text(text: str, role: str) -> List[Artifact]:
 
         content = _normalize_artifact_content(raw_content)
         if not _looks_like_file_content(safe_path, content):
-            logger.warning(f"Artifact ignored: {safe_path}, content does not look like file content")
+            logger.warning(f"Artifact ignored: {safe_path}, content rejected as placeholder/prompt-leak or invalid")
             continue
         if len(content.encode("utf-8")) > MAX_ARTIFACT_BYTES:
             logger.warning(f"Artifact ignored: {safe_path} too large")
