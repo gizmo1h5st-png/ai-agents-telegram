@@ -1675,34 +1675,45 @@ class AgentBot:
         ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
+    async def _get_current_or_last_tid(self, cid):
+        active = await self.redis.get(f"active_task:{cid}")
+        if active:
+            return int(active.decode()), True
+        last = await self.redis.get(f"last_task_tid:{cid}")
+        if last:
+            return int(last.decode()), False
+        return None, False
+
+    async def _recover_artifacts_from_history(self, cid, tid):
+        recovered = []
+        history = await self._get_history(cid, tid)
+        for item in history:
+            content = item.get("content") or ""
+            role = "unknown"
+            if ":" in content:
+                sender = content.split(":", 1)[0].lower()
+                for r, cfg in AGENT_BOTS.items():
+                    if r in sender or str(cfg.get("name", "")).lower() in sender:
+                        role = r
+                        break
+            recovered.extend(extract_artifacts_from_text(content, role=role))
+        if recovered:
+            await save_artifacts(self.redis, cid, tid, recovered)
+            await add_run_event(self.redis, cid, tid, "artifacts_recovered", role="system", data={"count": len(recovered), "files": [a.path for a in recovered]})
+        return recovered
+
     async def _show_artifacts(self, cid, message=None):
-        tid = await self._get_active_tid(cid)
+        tid, is_active = await self._get_current_or_last_tid(cid)
         if not tid:
-            text = "📦 <b>Артефакты</b>\n\n📭 Нет активной задачи."
+            text = "📦 <b>Артефакты</b>\n\n📭 Нет активной или последней задачи."
             btns = [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
         else:
             artifacts = await load_artifacts(self.redis, cid, tid)
-
-            # Backfill: if old parser missed artifacts, scan recent Redis history now.
             if not artifacts:
-                recovered = []
-                history = await self._get_history(cid, tid)
-                for item in history:
-                    content = item.get("content") or ""
-                    role = "unknown"
-                    if ":" in content:
-                        sender = content.split(":", 1)[0].lower()
-                        for r, cfg in AGENT_BOTS.items():
-                            if r in sender or str(cfg.get("name", "")).lower() in sender:
-                                role = r
-                                break
-                    recovered.extend(extract_artifacts_from_text(content, role=role))
-                if recovered:
-                    await save_artifacts(self.redis, cid, tid, recovered)
-                    artifacts = await load_artifacts(self.redis, cid, tid)
-                    await add_run_event(self.redis, cid, tid, "artifacts_recovered", role="system", data={"count": len(recovered), "files": [a.path for a in recovered]})
-
-            text = format_artifacts(artifacts)
+                await self._recover_artifacts_from_history(cid, tid)
+                artifacts = await load_artifacts(self.redis, cid, tid)
+            status = "активной" if is_active else "последней завершённой"
+            text = f"📦 <b>Артефакты {status} задачи #{tid}</b>\n\n" + format_artifacts(artifacts)
             btns = [
                 [InlineKeyboardButton(text="🚀 Push в GitHub", callback_data="task:push")],
                 [InlineKeyboardButton(text="🔄 Обновить", callback_data="task:artifacts")],
@@ -1728,16 +1739,18 @@ class AgentBot:
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _push_current_task(self, cid, message=None):
-        active = await self.redis.get(f"active_task:{cid}")
-        if not active:
-            text = "📭 Нет активной задачи для push."
+        tid, is_active = await self._get_current_or_last_tid(cid)
+        if not tid:
+            text = "📭 Нет активной или последней задачи для push."
             if message:
                 await self._send_or_edit(cid, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]), message=message)
             else:
                 await self.bot.send_message(cid, text)
             return
-        tid = int(active.decode())
         try:
+            artifacts = await load_artifacts(self.redis, cid, tid)
+            if not artifacts:
+                await self._recover_artifacts_from_history(cid, tid)
             dbid = await self.redis.get(f"db_task_id:{cid}:{tid}")
             db_task_id = int(dbid.decode()) if dbid else None
             result = await publish_task_artifacts(self.redis, cid, tid, db_task_id=db_task_id, role="Executor")
@@ -1950,6 +1963,7 @@ class AgentBot:
             return
         tid = int(time.time()) % 1000000
         await self.redis.setex(f"active_task:{cid}", 7200, str(tid))
+        await self.redis.setex(f"last_task_tid:{cid}", 86400 * 7, str(tid))
         await self.redis.setex(f"task_desc:{cid}:{tid}", 7200, task)
         task_type = classify_task(task) if getattr(settings, "DYNAMIC_STEPS_ENABLED", True) else "manual"
         budget = budget_for_task_type(task_type)
@@ -2202,6 +2216,12 @@ class AgentBot:
             parsed_final = False
             if not parsed_next_agent or parsed_next_agent == self.role:
                 parsed_next_agent = self._next_role_after(self.role, team)
+
+        if final_allowed and self.role == "coordinator" and not final_requested:
+            logger.info(f"Auto-finalizing ready task: type={task_type}, step={step}, budget={budget}")
+            await add_run_event(self.redis, cid, tid, "auto_finalized", role=self.role, data={"step": step, "type": task_type, "ready": ready})
+            response = "[ФИНАЛЬНЫЙ ОТВЕТ]\n" + strip_final_markers(response)
+            parsed_final = True
 
         if self.role in ("executor", "architect", "qa"):
             artifacts = extract_artifacts_from_text(response, role=self.role)
