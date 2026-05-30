@@ -55,12 +55,22 @@ def _allowed_prefixes() -> list[str]:
 
 
 def _allow_unfenced_artifacts() -> bool:
-    # Default False: safer. Enable only if you really want [FILE:] without ``` fences.
-    return bool(getattr(settings, "GITHUB_ALLOW_UNFENCED_ARTIFACTS", False))
+    # Default True after strict prompt-leak/placeholder/content validation.
+    # Set GITHUB_ALLOW_UNFENCED_ARTIFACTS=false to require fenced code blocks only.
+    return bool(getattr(settings, "GITHUB_ALLOW_UNFENCED_ARTIFACTS", True))
+
+
+def _normalize_raw_path(path: str) -> str:
+    path = html.unescape(path or "").strip()
+    # Telegram/LLM may turn PROJECT_AUDIT.md into PROJECT_[AUDIT.md](http://AUDIT.md).
+    # Inside [FILE: ...] we want the visible link text, not markdown URL.
+    path = re.sub(r"\[([^\]]+)\]\((?:https?://)?[^)]+\)", r"\1", path)
+    path = path.replace("`", "").strip()
+    return path
 
 
 def validate_artifact_path(path: str) -> str:
-    path = (path or "").strip().replace("\\", "/")
+    path = _normalize_raw_path(path).replace("\\", "/")
     if not path:
         raise ValueError("Empty artifact path")
 
@@ -122,6 +132,9 @@ def _is_placeholder_or_prompt_leak(content: str) -> bool:
         "пересмотри свой предыдущий вывод",
         "не спорь ради спора",
         "без изменения других файлов.",
+        "финализация пока невозможна",
+        "задача требует файл/артефакт",
+        "исполнитель должен выдать файл",
         "executor обязан выдать",
         "формат ответа",
         "не меняйте код.",
@@ -144,6 +157,7 @@ def _normalize_artifact_content(content: str) -> str:
     stop_markers = [
         "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель", "\n\nКоординатор",
         "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n```",
+        "\n\n⚠️ Финализация", "\n⚠️ Финализация",
         "\n\nИнструкция агенту:", "\nИнструкция агенту:",
         "\n\nБез изменения других файлов", "\nБез изменения других файлов",
     ]
