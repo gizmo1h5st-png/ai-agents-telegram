@@ -1,23 +1,31 @@
 import base64
+import html
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Format:
+# Supported formats:
 # [FILE: generated_code/example.py]
 # ```python
 # ...
 # ```
+#
+# Also supports imperfect model output where the closing ``` is missing.
 FILE_BLOCK_RE = re.compile(
     r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*?)```",
+    re.MULTILINE,
+)
+
+FILE_BLOCK_UNCLOSED_RE = re.compile(
+    r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*)$",
     re.MULTILINE,
 )
 
@@ -65,31 +73,87 @@ def validate_artifact_path(path: str) -> str:
     return str(p)
 
 
+def _normalize_artifact_content(content: str) -> str:
+    """Normalize content captured from Telegram/LLM output.
+
+    Telegram copies often show HTML as &lt;...&gt;. For artifacts we want real file content.
+    Also removes accidental trailing prose after an unclosed code block when possible.
+    """
+    content = content or ""
+    content = html.unescape(content)
+
+    # If model forgot closing fence and then continued with normal prose, cut common markers.
+    stop_markers = [
+        "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель",
+        "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n\n```",
+    ]
+    cut_at = None
+    for marker in stop_markers:
+        idx = content.find(marker)
+        if idx != -1:
+            cut_at = idx if cut_at is None else min(cut_at, idx)
+    if cut_at is not None:
+        content = content[:cut_at]
+
+    return content.strip() + "\n"
+
+
+def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
+    """Return list of (path, content) from closed and unclosed FILE blocks."""
+    text = text or ""
+    matches: List[Tuple[str, str]] = []
+    spans = []
+
+    for match in FILE_BLOCK_RE.finditer(text):
+        matches.append((match.group("path"), match.group("content") or ""))
+        spans.append(match.span())
+
+    # If there is no closed block for a [FILE:] occurrence, try unclosed fallback.
+    # This fixes common LLM output where final ``` is missing.
+    for match in FILE_BLOCK_UNCLOSED_RE.finditer(text):
+        span = match.span()
+        if any(not (span[1] <= s[0] or span[0] >= s[1]) for s in spans):
+            continue
+        matches.append((match.group("path"), match.group("content") or ""))
+
+    return matches
+
+
 def extract_artifacts_from_text(text: str, role: str) -> List[Artifact]:
     artifacts: List[Artifact] = []
-    for match in FILE_BLOCK_RE.finditer(text or ""):
-        raw_path = match.group("path")
-        content = match.group("content") or ""
+    seen_paths = set()
+
+    for raw_path, raw_content in _iter_file_matches(text):
         try:
             safe_path = validate_artifact_path(raw_path)
         except ValueError as e:
             logger.warning(f"Artifact ignored: path={raw_path!r}, reason={e}")
             continue
 
+        content = _normalize_artifact_content(raw_content)
         if not content.strip():
             continue
         if len(content.encode("utf-8")) > MAX_ARTIFACT_BYTES:
             logger.warning(f"Artifact ignored: {safe_path} too large")
             continue
 
+        # One message may include duplicate path; keep the latest occurrence.
+        if safe_path in seen_paths:
+            artifacts = [a for a in artifacts if a.path != safe_path]
+        seen_paths.add(safe_path)
+
         artifacts.append(
             Artifact(
                 path=safe_path,
-                content=content.rstrip() + "\n",
+                content=content,
                 role=role,
                 created_at=time.time(),
             )
         )
+
+    if text and "[FILE:" in text and not artifacts:
+        logger.warning("FILE marker detected, but no valid artifact extracted")
+
     return artifacts
 
 
@@ -150,4 +214,3 @@ def format_artifacts(artifacts: List[Artifact]) -> str:
         size = len(artifact.content.encode("utf-8"))
         lines.append(f"{idx}. <code>{artifact.path}</code> · {size} bytes · role=<code>{artifact.role}</code>")
     return "\n".join(lines)
-
