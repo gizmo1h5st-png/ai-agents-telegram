@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     CEREBRAS_API_KEY: str = ""
     CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
     LLM_REQUEST_TIMEOUT: int = 60
+    LLM_CONTINUE_MAX: int = 2
     SUMMARIZER_MODEL: str = "mistral-small-latest"
 
     # GitHub artifact publisher (D5)
