@@ -13,6 +13,7 @@ from app.config import settings, AGENT_BOTS, FREE_MODELS
 from app.llm.router import call_llm_sync, get_provider_for_model, get_llm_router_status
 from app.db.crud import create_task, add_message, update_task_status, update_task
 from app.db.models import TaskStatus
+from app.run_journal import add_run_event, get_run_events, create_plan_for_team, save_run_plan, get_run_plan, mark_plan_role_done, format_plan, format_events
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -519,6 +520,10 @@ class AgentBot:
                 await self._show_status(cid, cb.message)
             elif c == "history":
                 await self._show_history(cid, cb.message)
+            elif c == "events":
+                await self._show_events(cid, cb.message)
+            elif c == "plan":
+                await self._show_plan(cid, cb.message)
             await cb.answer()
 
         @self.router.callback_query(F.data.startswith("hist:"))
@@ -923,6 +928,12 @@ class AgentBot:
             if cmd in ("/history", "/last"):
                 await self._show_history(cid)
                 return
+            if cmd == "/events":
+                await self._show_events(cid)
+                return
+            if cmd == "/plan":
+                await self._show_plan(cid)
+                return
             if cmd == "/cleanup":
                 deleted = await self._cleanup_chat_runtime(cid)
                 await self.bot.send_message(cid, f"🧹 Очистка выполнена. Удалено ключей: {deleted}")
@@ -1100,6 +1111,32 @@ class AgentBot:
                     break
         return seen
 
+    async def _get_active_tid(self, cid):
+        active = await self.redis.get(f"active_task:{cid}")
+        return int(active.decode()) if active else None
+
+    async def _show_plan(self, cid, message=None):
+        tid = await self._get_active_tid(cid)
+        if not tid:
+            text = "🧭 <b>План</b>\n\n📭 Нет активной задачи."
+        else:
+            plan = await get_run_plan(self.redis, cid, tid)
+            text = f"🧭 <b>План задачи #{tid}</b>\n\n" + format_plan(plan)
+        btns = [[InlineKeyboardButton(text="🔄 Обновить", callback_data="cmd:plan")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_events(self, cid, message=None):
+        tid = await self._get_active_tid(cid)
+        if not tid:
+            text = "📋 <b>Events</b>\n\n📭 Нет активной задачи."
+        else:
+            events = await get_run_events(self.redis, cid, tid, limit=40)
+            text = f"📋 <b>Events задачи #{tid}</b>\n\n" + format_events(events)
+            if len(text) > 3900:
+                text = text[-3900:]
+        btns = [[InlineKeyboardButton(text="🔄 Обновить", callback_data="cmd:events")], [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
     async def _show_history(self, cid, message=None):
         """Показывает последние задачи из Postgres."""
         try:
@@ -1247,6 +1284,7 @@ class AgentBot:
             [InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts"), InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents")],
             [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
             [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
+            [InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan"), InlineKeyboardButton(text="📋 Events", callback_data="cmd:events")],
             [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
             [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
             [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
@@ -1542,6 +1580,9 @@ class AgentBot:
         await self.redis.setex(f"task_desc:{cid}:{tid}", 7200, task)
         team = await self._get_team(cid)
         await self.redis.setex(f"task_team:{cid}:{tid}", 7200, json.dumps(team))
+        plan = create_plan_for_team(task, team)
+        await save_run_plan(self.redis, cid, tid, plan)
+        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200]})
         await self.redis.set(f"steps:{cid}:{tid}", "0")
         await self.redis.expire(f"steps:{cid}:{tid}", 7200)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
@@ -1592,6 +1633,7 @@ class AgentBot:
                 await update_task_status(int(dbid.decode()), TaskStatus.COMPLETED, final_answer or completion_message)
         except Exception as e:
             logger.warning(f"DB task complete failed: {str(e)[:120]}")
+        await add_run_event(self.redis, cid, tid, "task_completed", role=self.role, data={"message": completion_message[:200] if completion_message else ""})
         await self._clear_task_runtime_keys(cid, tid)
         if completion_message:
             try:
@@ -1685,12 +1727,14 @@ class AgentBot:
 
         llm_msgs = [{"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]} for m in hist[-10:]]
         model = await self._get_model(cid)
+        await add_run_event(self.redis, cid, tid, "agent_turn_started", role=self.role, data={"step": step, "model": model})
         response = await asyncio.to_thread(call_llm_sync, prompt, llm_msgs, td, model, FALLBACK_MODELS)
         if not response:
             fail_key = f"llm_fail:{cid}:{tid}"
             fails = await self.redis.incr(fail_key)
             await self.redis.expire(fail_key, 900)
             logger.warning(f"LLM empty response: role={self.role}, task={tid}, fails={fails}")
+            await add_run_event(self.redis, cid, tid, "llm_empty_response", role=self.role, data={"fails": fails})
 
             if self.role == "coordinator" and (fails >= 2 or step >= ms):
                 await self._force_finalize(cid, tid, td, "Модель не вернула ответ или исчерпан лимит шагов.")
@@ -1727,6 +1771,7 @@ class AgentBot:
             logger.warning(
                 f"Early/incomplete final blocked: role={self.role}, step={step}, min={min_final_steps}, task={tid}, missing={missing_roles}, incomplete={incomplete_final}"
             )
+            await add_run_event(self.redis, cid, tid, "final_blocked", role=self.role, data={"step": step, "missing": missing_roles, "incomplete": incomplete_final})
             response = strip_final_markers(response)
             if not response:
                 response = "Пока рано завершать задачу. Продолжаю обсуждение и передаю ход дальше."
@@ -1769,6 +1814,8 @@ class AgentBot:
         except Exception as e:
             logger.warning(f"DB task step update failed: {str(e)[:120]}")
         await self._save_message(cid, tid, self.config["name"], msg)
+        await mark_plan_role_done(self.redis, cid, tid, self.role)
+        await add_run_event(self.redis, cid, tid, "agent_message", role=self.role, data={"step": int(new_steps), "next": parsed_next_agent, "final": bool(parsed_final)})
         if (parsed_final or is_final_response(response)) and final_allowed:
             await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.", response)
             return
