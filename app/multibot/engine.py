@@ -1003,7 +1003,14 @@ class AgentBot:
         history = await self._get_history(cid, tid)
         text = "\n".join([h.get("content", "") for h in history[-14:]]).lower()
         roles_seen = await self._get_roles_seen(cid, tid)
-        has_artifact = "[file:" in text or await self._has_artifacts(cid, tid)
+        has_artifact = await self._has_artifacts(cid, tid)
+        if not has_artifact and "[file:" in text:
+            # Try to recover from history once; readiness must be based on real saved artifact.
+            try:
+                await self._recover_artifacts_from_history(cid, tid)
+                has_artifact = await self._has_artifacts(cid, tid)
+            except Exception:
+                has_artifact = False
         has_executor = "executor" in roles_seen or "executor" not in team
         has_qa = "qa" in roles_seen or "qa" not in team
         has_critic = "critic" in roles_seen or "critic" not in team
@@ -2076,6 +2083,13 @@ class AgentBot:
             return
 
         try:
+            task_type = await self._get_task_type(cid, tid)
+            if self._artifact_required_for_task(td, task_type) and not await self._has_artifacts(cid, tid):
+                await self._recover_artifacts_from_history(cid, tid)
+                if not await self._has_artifacts(cid, tid):
+                    await self._handle_missing_required_artifact(cid, tid, td, "force finalize blocked: artifact required but missing")
+                    return
+
             history = await self._get_history(cid, tid)
             llm_msgs = [
                 {"role": "assistant" if m["role"] != "user" else "user", "content": m["content"]}
@@ -2309,6 +2323,11 @@ class AgentBot:
                 await save_artifacts(self.redis, cid, tid, artifacts)
                 await add_run_event(self.redis, cid, tid, "artifacts_saved", role=self.role, data={"count": len(artifacts), "files": [a.path for a in artifacts]})
                 await self.bot.send_message(cid, f"📦 Найдено артефактов для GitHub: {len(artifacts)}")
+            elif self.role == "executor" and self._artifact_required_for_task(td, task_type):
+                await add_run_event(self.redis, cid, tid, "artifact_parse_failed", role=self.role, data={"step": step, "has_file_marker": "[FILE:" in response})
+                # Show executor response, but route back to executor via coordinator warning below.
+                response += "\n\n⚠️ Artifact не сохранён: нужен полный [FILE: path] с содержимым файла в code block."
+                parsed_next_agent = "coordinator"
 
         sr = ""
         for q in re.findall(r'\[SEARCH:\s*(.+?)\]', response):
