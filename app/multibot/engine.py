@@ -571,6 +571,12 @@ class AgentBot:
                 await self._show_team_picker(cid, cb.message)
             elif c == "providers":
                 await self._show_providers_help(cid, cb.message)
+            elif c == "tasktools":
+                await self._show_task_tools_menu(cid, cb.message)
+            elif c == "knowledge":
+                await self._show_knowledge_menu(cid, cb.message)
+            elif c == "settings":
+                await self._show_settings_menu(cid, cb.message)
             elif c == "skills":
                 await self._show_skills(cid, cb.message)
             elif c == "context":
@@ -1567,45 +1573,72 @@ class AgentBot:
         dl = await self._get_delay(cid)
         active = await self.redis.get(f"active_task:{cid}")
         status = "🟢 активна" if active else "⚪ нет активной задачи"
-
-        btns = [
-            [InlineKeyboardButton(text="👥 Команда", callback_data="cmd:team"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
-            [InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts"), InlineKeyboardButton(text="🤖 Все агенты", callback_data="cmd:agents")],
-            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
-            [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
-            [InlineKeyboardButton(text="🧠 Память", callback_data="cmd:memory"), InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills")],
-            [InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan"), InlineKeyboardButton(text="📋 Events", callback_data="cmd:events")],
-            [InlineKeyboardButton(text="📦 Артефакты", callback_data="cmd:artifacts"), InlineKeyboardButton(text="🚀 GitHub", callback_data="cmd:github")],
-            [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
-            [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
-            [InlineKeyboardButton(text="📄 Context", callback_data="cmd:context"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
-            [InlineKeyboardButton(text="🧩 Free API провайдеры", callback_data="cmd:providers")],
-            [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="cmd:help"), InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
-            [InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
-        ]
-
         team = await self._get_team(cid)
-        team_line = " → ".join([f"{AGENT_BOTS[r]['emoji']} {AGENT_BOTS[r]['name']}" for r in team])
+        team_line = " → ".join([AGENT_BOTS[r]["emoji"] for r in team])
+
         text = (
             "<b>🚀 AI Agents Team</b>\n"
-            "<i>6 Telegram-агентов: координатор, исследователь, архитектор, исполнитель, QA, критик.</i>\n\n"
-            f"<b>Состояние:</b> {status}\n"
-            f"<b>Активная команда:</b> {team_line}\n"
-            f"<b>Общая модель:</b> <code>{gm}</code>\n"
-            f"<b>Лимит:</b> {ms} шагов · <b>Пауза:</b> {dl}с\n\n"
+            "<i>Центр управления мультиагентной командой</i>\n\n"
+            f"<b>Статус:</b> {status}\n"
+            f"<b>Команда:</b> {team_line}\n"
+            f"<b>Модель:</b> <code>{gm}</code>\n"
+            f"<b>Лимиты:</b> {ms} шагов · задержка {dl}с\n\n"
             "<b>Быстрый старт:</b>\n"
-            "• <code>Задача: опиши задачу</code> — начать обсуждение\n"
-            "• <code>/team</code> — выбрать состав агентов\n"
-            "• <code>/stop</code> — остановить активную задачу\n"
-            "• Замечание агенту: reply на сообщение бота или <code>@Qabotai_bot текст</code>\n\n"
-            "<b>Правильные usernames:</b>\n"
-            "🎯 <code>@coordintor_ai_bot</code>\n"
-            "🔍 <code>@Researcher1_ai_bot</code>\n"
-            "🏗️ <code>@Architect1_ai_bot</code>\n"
-            "⚡ <code>@executorai_ai_bot</code>\n"
-            "🧪 <code>@Qabotai_bot</code>\n"
-            "🧐 <code>@criticaibot_bot</code>"
+            "<code>Задача: опиши, что нужно сделать</code>\n\n"
+            "<b>Основные разделы:</b>"
         )
+
+        btns = [
+            [InlineKeyboardButton(text="🎯 Задача", callback_data="cmd:tasktools"), InlineKeyboardButton(text="👥 Команда", callback_data="cmd:team")],
+            [InlineKeyboardButton(text="🤖 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🧠 Знания", callback_data="cmd:knowledge")],
+            [InlineKeyboardButton(text="📦 GitHub", callback_data="cmd:github"), InlineKeyboardButton(text="⚙️ Настройки", callback_data="cmd:settings")],
+            [InlineKeyboardButton(text="❓ Помощь", callback_data="cmd:help"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_task_tools_menu(self, cid, message=None):
+        active = await self.redis.get(f"active_task:{cid}")
+        status = "🟢 Есть активная задача" if active else "⚪ Нет активной задачи"
+        text = (
+            "🎯 <b>Задача</b>\n\n"
+            f"{status}\n\n"
+            "Здесь управление текущей задачей: статус, план, события, история и завершение."
+        )
+        btns = [
+            [InlineKeyboardButton(text="📊 Статус", callback_data="cmd:status"), InlineKeyboardButton(text="🧭 План", callback_data="cmd:plan")],
+            [InlineKeyboardButton(text="📋 Events", callback_data="cmd:events"), InlineKeyboardButton(text="📜 История", callback_data="cmd:history")],
+            [InlineKeyboardButton(text="✅ Финализировать", callback_data="task:finalize"), InlineKeyboardButton(text="🛑 Остановить", callback_data="task:stop")],
+            [InlineKeyboardButton(text="🧹 Cleanup", callback_data="task:cleanup")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_knowledge_menu(self, cid, message=None):
+        text = (
+            "🧠 <b>Знания и контекст</b>\n\n"
+            "Память, skills и постоянный контекст помогают агентам учитывать историю проекта и типовые инструкции."
+        )
+        btns = [
+            [InlineKeyboardButton(text="🧠 Память", callback_data="cmd:memory"), InlineKeyboardButton(text="🧩 Skills", callback_data="cmd:skills")],
+            [InlineKeyboardButton(text="📄 Context", callback_data="cmd:context")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_settings_menu(self, cid, message=None):
+        text = (
+            "⚙️ <b>Настройки</b>\n\n"
+            "Модели, промпты, лимиты, задержки и диагностика провайдеров.\n\n"
+            "<i>Подсказка:</i> модели агентов меняются только в разделе <b>🎛 Модели агентов</b>, чтобы не дублировать управление."
+        )
+        btns = [
+            [InlineKeyboardButton(text="🤖 Общая модель", callback_data="cmd:model"), InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel")],
+            [InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts"), InlineKeyboardButton(text="📋 Все модели", callback_data="cmd:models")],
+            [InlineKeyboardButton(text="📊 Шаги", callback_data="cmd:steps"), InlineKeyboardButton(text="⏱ Задержка", callback_data="cmd:delay")],
+            [InlineKeyboardButton(text="🧩 LLM провайдеры", callback_data="cmd:providers"), InlineKeyboardButton(text="⚙️ Конфиг", callback_data="cmd:config")],
+            [InlineKeyboardButton(text="🔄 Сброс моделей", callback_data="resetmodels")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
 
     async def _show_team_picker(self, cid, message=None):
@@ -1635,7 +1668,7 @@ class AgentBot:
             model = await self._get_model_for_role(cid, r)
             short = model.split("/")[-1].replace(":free", "")[:22]
             btns.append([InlineKeyboardButton(text=f"{cfg['emoji']} {cfg['name']} · {short}", callback_data=f"agentcfg:{r}")])
-        btns.append([InlineKeyboardButton(text="🎛 Быстрая смена моделей", callback_data="cmd:agentmodel")])
+        btns.append([InlineKeyboardButton(text="🎛 Модели агентов", callback_data="cmd:agentmodel"), InlineKeyboardButton(text="📝 Промпты", callback_data="cmd:agentprompts")])
         btns.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")])
         await self._send_or_edit(
             cid,
