@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     DYNAMIC_STEPS_ENABLED: bool = True
     AUTO_TEAM_BY_TASK_TYPE: bool = True
     DEFAULT_TASK_TYPE: str = "general"
+
+    # Trading mode (T2 base, no auto-trading)
+    TRADING_MODE_ENABLED: bool = False
+    TRADING_MIN_24H_VOLUME: float = 100000.0
+    TRADING_ALERTS_ONLY: bool = True
     IDLE_TIMEOUT_MINUTES: int = 10
 
     @property
