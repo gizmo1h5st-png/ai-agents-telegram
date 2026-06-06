@@ -19,6 +19,7 @@ from app.memory.service import remember, list_chat_memories, search_chat_memorie
 from app.artifacts import extract_artifacts_from_text, save_artifacts, load_artifacts, clear_artifacts, format_artifacts
 from app.github_service import publish_task_artifacts
 from app.github_publisher import GitHubPublisherError, GitHubConflictError
+from app.trading.loader import list_trading_strategies, build_trading_context, select_strategies_for_text
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -74,6 +75,16 @@ def classify_task(task: str) -> str:
 
 def budget_for_task_type(task_type: str) -> dict:
     return TASK_STEP_BUDGETS.get(task_type, TASK_STEP_BUDGETS["general"])
+
+
+def is_trading_task_text(text: str) -> bool:
+    t = (text or "").lower()
+    return any(x in t for x in [
+        "trading", "trade", "трейдинг", "трейд", "bybit", "btc", "eth", "usdt",
+        "long", "short", "лонг", "шорт", "ликвид", "liquidity", "sweep",
+        "volume", "объем", "объём", "fvg", "order block", "ордер блок",
+        "график", "свеч", "таймфрейм", "timeframe", "фьючерс"
+    ])
 
 
 def allowed_user_id(uid):
@@ -543,6 +554,10 @@ class AgentBot:
         async def handle_message(message: Message):
             await self._process_message(message)
 
+        @self.router.message(F.photo)
+        async def handle_photo(message: Message):
+            await self._process_photo(message)
+
         @self.router.callback_query(F.data.startswith("cmd:"))
         async def cmd_cb(cb: CallbackQuery):
             if self.role != "coordinator":
@@ -571,6 +586,10 @@ class AgentBot:
                 await self._show_team_picker(cid, cb.message)
             elif c == "providers":
                 await self._show_providers_help(cid, cb.message)
+            elif c == "trading":
+                await self._show_trading_menu(cid, cb.message)
+            elif c == "trading_strategies":
+                await self._show_trading_strategies(cid, cb.message)
             elif c == "tasktools":
                 await self._show_task_tools_menu(cid, cb.message)
             elif c == "knowledge":
@@ -729,6 +748,53 @@ class AgentBot:
                 await self._set_team(cid, list(presets[action]))
                 await self._show_team_picker(cid, cb.message)
                 await cb.answer("Пресет выбран")
+                return
+            await cb.answer("❌")
+
+        @self.router.callback_query(F.data.startswith("trade:"))
+        async def trade_cb(cb: CallbackQuery):
+            if self.role != "coordinator":
+                await cb.answer()
+                return
+            if cb.from_user and not allowed_user_id(cb.from_user.id):
+                await cb.answer("⛔ Нет доступа", show_alert=True)
+                return
+            cid = cb.message.chat.id
+            action = cb.data.split(":", 1)[1]
+            if action == "on":
+                await self._set_trading_enabled(cid, True)
+                await self._show_trading_menu(cid, cb.message)
+                await cb.answer("Trading mode ON")
+                return
+            if action == "off":
+                await self._set_trading_enabled(cid, False)
+                await self._show_trading_menu(cid, cb.message)
+                await cb.answer("Trading mode OFF")
+                return
+            if action == "strategies":
+                await self._show_trading_strategies(cid, cb.message)
+                await cb.answer()
+                return
+            if action.startswith("strat:"):
+                sid = action.split(":", 1)[1]
+                strategies = await self._get_enabled_trading_strategies(cid)
+                if sid in strategies:
+                    strategies.remove(sid)
+                else:
+                    strategies.append(sid)
+                await self._set_enabled_trading_strategies(cid, strategies)
+                await self._show_trading_strategies(cid, cb.message)
+                await cb.answer("Стратегии обновлены")
+                return
+            if action == "all":
+                await self._set_enabled_trading_strategies(cid, list(list_trading_strategies().keys()))
+                await self._show_trading_strategies(cid, cb.message)
+                await cb.answer("Все стратегии включены")
+                return
+            if action == "none":
+                await self._set_enabled_trading_strategies(cid, [])
+                await self._show_trading_strategies(cid, cb.message)
+                await cb.answer("Стратегии выключены")
                 return
             await cb.answer("❌")
 
@@ -1037,6 +1103,29 @@ class AgentBot:
             return "researcher" in roles_seen and has_critic
         return has_executor and (has_qa or has_critic)
 
+    async def _get_trading_enabled(self, cid):
+        raw = await self.redis.get(f"trading_enabled:{cid}")
+        if raw is None:
+            return bool(getattr(settings, "TRADING_MODE_ENABLED", False))
+        return raw.decode() == "1"
+
+    async def _set_trading_enabled(self, cid, enabled: bool):
+        await self.redis.setex(f"trading_enabled:{cid}", 86400 * 30, "1" if enabled else "0")
+
+    async def _get_enabled_trading_strategies(self, cid):
+        raw = await self.redis.get(f"trading_strategies:{cid}")
+        all_ids = list(list_trading_strategies().keys())
+        if raw is None:
+            return all_ids
+        try:
+            return [x for x in json.loads(raw.decode()) if x in all_ids]
+        except Exception:
+            return all_ids
+
+    async def _set_enabled_trading_strategies(self, cid, strategies):
+        strategies = [s for s in strategies if s in list_trading_strategies()]
+        await self.redis.setex(f"trading_strategies:{cid}", 86400 * 30, json.dumps(strategies))
+
     def _next_role_after(self, current_role, team):
         team = [r for r in team if r in ROLE_ORDER]
         if not team:
@@ -1111,6 +1200,24 @@ class AgentBot:
             if total > 1:
                 await asyncio.sleep(0.3)
 
+    async def _process_photo(self, message: Message):
+        if self.role != "coordinator":
+            return
+        cid = message.chat.id
+        if message.from_user and not allowed_user_id(message.from_user.id):
+            await self.bot.send_message(cid, "⛔ Нет доступа.")
+            return
+        if not await self._get_trading_enabled(cid):
+            await self.bot.send_message(cid, "📷 Фото получено. Для анализа графиков включи trading-mode: /trading_on")
+            return
+        await self.bot.send_message(
+            cid,
+            "📷 Скриншот графика получен. Vision-анализ будет подключён в T3/T4.\n\n"
+            "Пока пришли текстом: symbol, timeframe, текущую цену/уровни и что хочешь проверить.\n"
+            "Например: <code>BTCUSDT 15m, проверить liquidity sweep + FVG</code>",
+            parse_mode="HTML",
+        )
+
     async def _process_message(self, message: Message):
         cid = message.chat.id
         text = message.text or ""
@@ -1147,6 +1254,20 @@ class AgentBot:
                 return
             if cmd == "/team":
                 await self._show_team_picker(cid)
+                return
+            if cmd == "/trading":
+                await self._show_trading_menu(cid)
+                return
+            if cmd == "/trading_on":
+                await self._set_trading_enabled(cid, True)
+                await self._show_trading_menu(cid)
+                return
+            if cmd == "/trading_off":
+                await self._set_trading_enabled(cid, False)
+                await self._show_trading_menu(cid)
+                return
+            if cmd == "/strategies":
+                await self._show_trading_strategies(cid)
                 return
             if cmd in ("/showconfig", "/config"):
                 await self._show_config(cid)
@@ -1591,7 +1712,8 @@ class AgentBot:
         btns = [
             [InlineKeyboardButton(text="🎯 Задача", callback_data="cmd:tasktools"), InlineKeyboardButton(text="👥 Команда", callback_data="cmd:team")],
             [InlineKeyboardButton(text="🤖 Агенты", callback_data="cmd:agents"), InlineKeyboardButton(text="🧠 Знания", callback_data="cmd:knowledge")],
-            [InlineKeyboardButton(text="📦 GitHub", callback_data="cmd:github"), InlineKeyboardButton(text="⚙️ Настройки", callback_data="cmd:settings")],
+            [InlineKeyboardButton(text="📈 Trading", callback_data="cmd:trading"), InlineKeyboardButton(text="📦 GitHub", callback_data="cmd:github")],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="cmd:settings")],
             [InlineKeyboardButton(text="❓ Помощь", callback_data="cmd:help"), InlineKeyboardButton(text="❌ Закрыть", callback_data="task:close")],
         ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
@@ -1828,6 +1950,40 @@ class AgentBot:
         else:
             await self.bot.send_message(cid, text, parse_mode="HTML")
 
+    async def _show_trading_menu(self, cid, message=None):
+        enabled = await self._get_trading_enabled(cid)
+        strategies = await self._get_enabled_trading_strategies(cid)
+        status = "🟢 ON" if enabled else "⚪ OFF"
+        strat_names = [list_trading_strategies()[sid]["name"] for sid in strategies if sid in list_trading_strategies()]
+        text = (
+            "📈 <b>Trading Mode</b>\n\n"
+            f"<b>Статус:</b> {status}\n"
+            "<b>Режим:</b> alerts only, без автотрейдинга\n"
+            f"<b>Фильтр Bybit futures:</b> 24h volume ≥ <code>{getattr(settings, 'TRADING_MIN_24H_VOLUME', 100000)}</code> USDT\n"
+            f"<b>Стратегии:</b> {', '.join(strat_names) if strat_names else 'нет'}\n\n"
+            "T2 подключает trading-профили и стратегии к prompt. Bybit watcher и vision-анализ скриншотов будут в следующих пакетах."
+        )
+        btns = [
+            [InlineKeyboardButton(text="🟢 Включить", callback_data="trade:on"), InlineKeyboardButton(text="⚪ Выключить", callback_data="trade:off")],
+            [InlineKeyboardButton(text="🧠 Стратегии", callback_data="trade:strategies")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _show_trading_strategies(self, cid, message=None):
+        enabled = set(await self._get_enabled_trading_strategies(cid))
+        registry = list_trading_strategies()
+        text = "📈 <b>Trading Strategies</b>\n\nВыбери стратегии для trading-mode."
+        btns = []
+        for sid, meta in registry.items():
+            mark = "✅" if sid in enabled else "☐"
+            btns.append([InlineKeyboardButton(text=f"{mark} {meta['name']}", callback_data=f"trade:strat:{sid}")])
+        btns += [
+            [InlineKeyboardButton(text="✅ Все", callback_data="trade:all"), InlineKeyboardButton(text="☐ Ни одной", callback_data="trade:none")],
+            [InlineKeyboardButton(text="⬅️ Trading", callback_data="cmd:trading"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
+        ]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
     async def _show_skills(self, cid, message=None):
         enabled = set(await self._get_enabled_skills(cid))
         registry = list_skills()
@@ -2037,12 +2193,20 @@ class AgentBot:
         enabled_skills = await self._get_enabled_skills(cid)
         task_skills = select_skills_for_task(task, enabled=enabled_skills)
         await self.redis.setex(f"task_skills:{cid}:{tid}", 7200, json.dumps(task_skills))
-        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200], "skills": task_skills, "task_type": task_type, "budget": budget})
+        trading_enabled = await self._get_trading_enabled(cid)
+        task_trading = bool(trading_enabled and is_trading_task_text(task))
+        trading_strategies = []
+        if task_trading:
+            enabled_trading_strategies = await self._get_enabled_trading_strategies(cid)
+            trading_strategies = select_strategies_for_text(task, enabled=enabled_trading_strategies)
+            await self.redis.setex(f"task_trading:{cid}:{tid}", 7200, "1")
+            await self.redis.setex(f"task_trading_strategies:{cid}:{tid}", 7200, json.dumps(trading_strategies))
+        await add_run_event(self.redis, cid, tid, "task_started", role="coordinator", data={"team": team, "task": task[:200], "skills": task_skills, "task_type": task_type, "budget": budget, "trading": task_trading, "trading_strategies": trading_strategies})
         await self.redis.set(f"steps:{cid}:{tid}", "0")
         await self.redis.expire(f"steps:{cid}:{tid}", 7200)
         await self.redis.setex(f"turn:{cid}:{tid}", 600, "coordinator")
         model = await self._get_model(cid)
-        ms = await self._get_max_steps(cid)
+        ms = int(budget.get("hard", await self._get_max_steps(cid)))
         dl = await self._get_delay(cid)
         try:
             db_task = await create_task(cid, message.from_user.id if message.from_user else 0, task, model)
@@ -2068,6 +2232,8 @@ class AgentBot:
         await self.redis.delete(f"task_type:{cid}:{tid}")
         await self.redis.delete(f"step_budget:{cid}:{tid}")
         await self.redis.delete(f"task_skills:{cid}:{tid}")
+        await self.redis.delete(f"task_trading:{cid}:{tid}")
+        await self.redis.delete(f"task_trading_strategies:{cid}:{tid}")
         for role in ROLE_ORDER:
             await self.redis.delete(f"pending:{cid}:{role}")
             await self.redis.delete(f"rate:{role}:{cid}")
@@ -2084,6 +2250,8 @@ class AgentBot:
             f"task_type:{cid}:{tid}",
             f"step_budget:{cid}:{tid}",
             f"task_skills:{cid}:{tid}",
+            f"task_trading:{cid}:{tid}",
+            f"task_trading_strategies:{cid}:{tid}",
         )
 
     async def _complete_task(self, cid, tid, completion_message="✅ Задача завершена. Новые ходы агентов остановлены.", final_answer=None):
@@ -2237,6 +2405,14 @@ class AgentBot:
         skills_block = build_skills_context(task_skills)
         if skills_block:
             prompt += skills_block
+        task_trading_raw = await self.redis.get(f"task_trading:{cid}:{tid}")
+        if task_trading_raw and task_trading_raw.decode() == "1":
+            raw_trading_strategies = await self.redis.get(f"task_trading_strategies:{cid}:{tid}")
+            trading_strategies = json.loads(raw_trading_strategies.decode()) if raw_trading_strategies else []
+            trading_context = build_trading_context(self.role, td, enabled_strategies=trading_strategies)
+            if trading_context:
+                prompt += trading_context
+            prompt += f"\n\nTRADING HARD RULES: alerts only, no auto-trading. Ignore Bybit futures pairs with 24h volume below {getattr(settings, 'TRADING_MIN_24H_VOLUME', 100000)} USDT. Always include: not financial advice."
 
         min_final_steps = int(budget.get("min", getattr(settings, "MIN_FINAL_STEPS", 6)))
         if step < min_final_steps:
