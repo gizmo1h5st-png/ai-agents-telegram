@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     TRADING_MODE_ENABLED: bool = False
     TRADING_MIN_24H_VOLUME: float = 100000.0
     TRADING_ALERTS_ONLY: bool = True
+    BYBIT_BASE_URL: str = "https://api.bybit.com"
+    BYBIT_REQUEST_TIMEOUT: int = 20
+    TRADING_SCAN_INTERVAL: int = 60
+    TRADING_ALERT_COOLDOWN: int = 1800
     IDLE_TIMEOUT_MINUTES: int = 10
 
     @property
