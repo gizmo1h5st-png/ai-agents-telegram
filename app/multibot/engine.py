@@ -20,6 +20,9 @@ from app.artifacts import extract_artifacts_from_text, save_artifacts, load_arti
 from app.github_service import publish_task_artifacts
 from app.github_publisher import GitHubPublisherError, GitHubConflictError
 from app.trading.loader import list_trading_strategies, build_trading_context, select_strategies_for_text
+from app.trading.bybit import BybitPublicClient, normalize_symbol, normalize_timeframe
+from app.trading.watchlist import add_watch, remove_watch, list_watch, all_watchlists
+from app.trading.signals import detect_t3_signals
 
 logger = logging.getLogger(__name__)
 ROLE_ORDER = ["coordinator", "researcher", "architect", "executor", "qa", "critic"]
@@ -605,6 +608,8 @@ class AgentBot:
                 await self._show_trading_menu(cid, cb.message)
             elif c == "trading_strategies":
                 await self._show_trading_strategies(cid, cb.message)
+            elif c == "watchlist":
+                await self._show_watchlist(cid, cb.message)
             elif c == "tasktools":
                 await self._show_task_tools_menu(cid, cb.message)
             elif c == "knowledge":
@@ -1283,6 +1288,18 @@ class AgentBot:
                 return
             if cmd == "/strategies":
                 await self._show_trading_strategies(cid)
+                return
+            if cmd.startswith("/watch"):
+                await self._cmd_watch(cid, text)
+                return
+            if cmd.startswith("/unwatch"):
+                await self._cmd_unwatch(cid, text)
+                return
+            if cmd == "/watchlist":
+                await self._show_watchlist(cid)
+                return
+            if cmd == "/scan":
+                await self._scan_trading_chat(cid, manual=True)
                 return
             if cmd in ("/showconfig", "/config"):
                 await self._show_config(cid)
@@ -1965,6 +1982,98 @@ class AgentBot:
         else:
             await self.bot.send_message(cid, text, parse_mode="HTML")
 
+    async def _cmd_watch(self, cid, text):
+        parts = text.split()
+        if len(parts) < 3:
+            await self.bot.send_message(cid, "📈 Использование: <code>/watch BTCUSDT 15m</code>", parse_mode="HTML")
+            return
+        try:
+            symbol = normalize_symbol(parts[1])
+            timeframe = normalize_timeframe(parts[2])
+            client = BybitPublicClient()
+            ok, ticker, reason = await asyncio.to_thread(client.is_symbol_eligible, symbol)
+            if not ok:
+                await self.bot.send_message(cid, f"⛔ {symbol} не добавлен: {reason}")
+                return
+            item = await add_watch(self.redis, cid, symbol, timeframe)
+            await self._set_trading_enabled(cid, True)
+            await self.bot.send_message(
+                cid,
+                f"✅ Добавлено в watchlist: <b>{item.symbol}</b> {item.timeframe}\n"
+                f"24h turnover: <code>{ticker.turnover_24h:.0f}</code> USDT",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await self.bot.send_message(cid, f"❌ Не удалось добавить watch: {str(e)[:200]}")
+
+    async def _cmd_unwatch(self, cid, text):
+        parts = text.split()
+        if len(parts) < 3:
+            await self.bot.send_message(cid, "📈 Использование: <code>/unwatch BTCUSDT 15m</code>", parse_mode="HTML")
+            return
+        try:
+            symbol = normalize_symbol(parts[1])
+            timeframe = normalize_timeframe(parts[2])
+            ok = await remove_watch(self.redis, cid, symbol, timeframe)
+            await self.bot.send_message(cid, f"{'✅ Удалено' if ok else '⚠️ Не найдено'}: {symbol} {timeframe}")
+        except Exception as e:
+            await self.bot.send_message(cid, f"❌ Ошибка unwatch: {str(e)[:200]}")
+
+    async def _show_watchlist(self, cid, message=None):
+        items = await list_watch(self.redis, cid)
+        if not items:
+            text = "📈 <b>Watchlist пуст</b>\n\nДобавь пару: <code>/watch BTCUSDT 15m</code>"
+        else:
+            lines = ["📈 <b>Trading Watchlist</b>\n"]
+            for it in items:
+                lines.append(f"• <code>{it.symbol}</code> <b>{it.timeframe}</b> {'🟢' if it.enabled else '⚪'}")
+            lines.append("\nКоманды: <code>/watch BTCUSDT 15m</code>, <code>/unwatch BTCUSDT 15m</code>, <code>/scan</code>")
+            text = "\n".join(lines)
+        btns = [[InlineKeyboardButton(text="🔎 Scan now", callback_data="cmd:watchlist")], [InlineKeyboardButton(text="📈 Trading", callback_data="cmd:trading"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")]]
+        await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
+
+    async def _scan_trading_chat(self, cid, manual=False):
+        if not await self._get_trading_enabled(cid):
+            if manual:
+                await self.bot.send_message(cid, "📈 Trading mode выключен. Включи: /trading_on")
+            return
+        items = await list_watch(self.redis, cid)
+        if not items:
+            if manual:
+                await self.bot.send_message(cid, "📈 Watchlist пуст. Добавь: /watch BTCUSDT 15m")
+            return
+        client = BybitPublicClient()
+        alerts = []
+        for it in items:
+            try:
+                ok, ticker, reason = await asyncio.to_thread(client.is_symbol_eligible, it.symbol)
+                if not ok:
+                    continue
+                candles = await asyncio.to_thread(client.get_klines, it.symbol, it.timeframe, 120)
+                signals = detect_t3_signals(candles)
+                for sig in signals:
+                    cooldown_key = f"trading_alert:{cid}:{it.symbol}:{it.timeframe}:{sig['strategy']}:{sig['direction']}"
+                    if await self.redis.get(cooldown_key):
+                        continue
+                    await self.redis.setex(cooldown_key, int(getattr(settings, "TRADING_ALERT_COOLDOWN", 1800)), "1")
+                    alerts.append((it, ticker, sig))
+            except Exception as e:
+                logger.warning(f"Trading scan error {it.symbol} {it.timeframe}: {str(e)[:160]}")
+        if manual and not alerts:
+            await self.bot.send_message(cid, "📈 Scan complete: интересных ситуаций не найдено.")
+        for it, ticker, sig in alerts[:5]:
+            text = (
+                f"🚨 <b>{it.symbol} {it.timeframe}</b>\n"
+                f"Strategy: <b>{sig['strategy']}</b>\n"
+                f"Direction: <code>{sig['direction']}</code>\n"
+                f"Confidence: <code>{sig['confidence']}</code>\n"
+                f"Last price: <code>{ticker.last_price}</code>\n"
+                f"Invalidation: <code>{sig.get('invalidation')}</code>\n"
+                f"Reason: {sig['reason']}\n\n"
+                "⚠️ Not financial advice. Alerts only, no auto-trading."
+            )
+            await self.bot.send_message(cid, text, parse_mode="HTML")
+
     async def _show_trading_menu(self, cid, message=None):
         enabled = await self._get_trading_enabled(cid)
         strategies = await self._get_enabled_trading_strategies(cid)
@@ -1980,7 +2089,7 @@ class AgentBot:
         )
         btns = [
             [InlineKeyboardButton(text="🟢 Включить", callback_data="trade:on"), InlineKeyboardButton(text="⚪ Выключить", callback_data="trade:off")],
-            [InlineKeyboardButton(text="🧠 Стратегии", callback_data="trade:strategies")],
+            [InlineKeyboardButton(text="🧠 Стратегии", callback_data="trade:strategies"), InlineKeyboardButton(text="📈 Watchlist", callback_data="cmd:watchlist")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="cmd:menu")],
         ]
         await self._send_or_edit(cid, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), message=message)
@@ -2645,6 +2754,8 @@ class AgentBot:
         me = await self.bot.get_me()
         logger.info(f"🤖 {self.config['emoji']} {self.config['name']} (@{me.username}) started")
         asyncio.create_task(self._poll_pending())
+        if self.role == "coordinator":
+            asyncio.create_task(self._poll_trading_watchlists())
         await self.dp.start_polling(self.bot)
 
     async def _poll_pending(self):
@@ -2709,6 +2820,16 @@ class AgentBot:
                         await self._release_task_lock(cid, tid)
             except Exception as e:
                 logger.error(f"Poll error: {e}")
+
+    async def _poll_trading_watchlists(self):
+        while True:
+            await asyncio.sleep(int(getattr(settings, "TRADING_SCAN_INTERVAL", 60)))
+            try:
+                all_lists = await all_watchlists(self.redis)
+                for cid in all_lists.keys():
+                    await self._scan_trading_chat(cid, manual=False)
+            except Exception as e:
+                logger.warning(f"Trading watchlist poll error: {str(e)[:160]}")
 
     async def stop(self):
         await self.bot.session.close()
