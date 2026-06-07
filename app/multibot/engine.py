@@ -263,16 +263,31 @@ def asks_another_agent_to_continue(text, current_role="coordinator"):
     """Detects pseudo-final answers that actually delegate work to another agent."""
     t = (text or "").lower()
     action_words = (
-        "подтверди", "уточни", "проверь", "выполни", "сделай", "предоставь",
-        "проанализируй", "оцени", "передаю", "переходим", "нужно", "требуется",
-        "запроси", "исправь", "доработай", "валидируй", "проведи"
+        "подтверди", "подтвердить", "уточни", "уточнить", "проверь", "проверить",
+        "выполни", "выполнить", "сделай", "предоставь", "предоставить",
+        "проанализируй", "проанализировать", "оцени", "оценить", "передаю",
+        "переходим", "нужно", "требуется", "запроси", "исправь", "доработай",
+        "валидируй", "валидац", "проведи", "укажи", "указать", "дай", "подготовь"
     )
     if not any(w in t for w in action_words):
         return False
+
+    role_aliases = {
+        "coordinator": ("координатор", "coordinator"),
+        "researcher": ("исследователь", "researcher"),
+        "architect": ("архитектор", "architect"),
+        "executor": ("исполнитель", "executor"),
+        "qa": ("qa", "тестировщик", "тестер"),
+        "critic": ("критик", "critic"),
+    }
     for role in ROLE_ORDER:
         if role == current_role:
             continue
-        if any(m in t for m in AGENT_MENTIONS.get(role, ())) or str(AGENT_BOTS.get(role, {}).get("name", "")).lower() in t:
+        if any(m in t for m in AGENT_MENTIONS.get(role, ())):
+            return True
+        if any(alias in t for alias in role_aliases.get(role, ())):
+            return True
+        if str(AGENT_BOTS.get(role, {}).get("name", "")).lower() in t:
             return True
     return False
 
@@ -2567,18 +2582,21 @@ class AgentBot:
         await add_run_event(self.redis, cid, tid, "agent_message", role=self.role, data={"step": int(new_steps), "next": parsed_next_agent, "final": bool(parsed_final)})
         if (parsed_final or is_final_response(response)) and final_allowed:
             if settings.GITHUB_AUTO_PUSH:
+                artifact_required_for_push = self._artifact_required_for_task(td, task_type)
                 artifacts_before_push = await load_artifacts(self.redis, cid, tid)
                 if not artifacts_before_push:
                     await self._recover_artifacts_from_history(cid, tid)
                     artifacts_before_push = await load_artifacts(self.redis, cid, tid)
                 if artifacts_before_push:
                     await self._push_current_task(cid)
-                else:
+                elif artifact_required_for_push:
                     await self.bot.send_message(
                         cid,
                         "⚠️ GitHub auto-push пропущен: в задаче нет сохранённых артефактов. "
                         "Попроси Исполнителя выдать файл в формате [FILE: path] + code block, затем проверь /artifacts и выполни /push."
                     )
+                else:
+                    logger.info("GitHub auto-push skipped: task has no artifacts and does not require artifacts")
             await self._complete_task(cid, tid, "✅ Финальный ответ получен. Задача закрыта, дальнейшие ходы остановлены.", response)
             return
 
