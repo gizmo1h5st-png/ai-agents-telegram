@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     TRADING_ALERTS_ONLY: bool = True
     BYBIT_BASE_URL: str = "https://api.bybit.com"
     BYBIT_REQUEST_TIMEOUT: int = 20
+    BYBIT_DISABLE_DIRECT_FALLBACK: bool = False
     TRADING_SCAN_INTERVAL: int = 60
     TRADING_ALERT_COOLDOWN: int = 1800
     IDLE_TIMEOUT_MINUTES: int = 10
