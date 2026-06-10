@@ -59,9 +59,16 @@ class BybitPublicClient:
     def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         # First try configured proxy/base URL. Then try known public mirrors as fallback.
         bases = [self.base_url]
-        for alt in ["https://api.bytick.com", "https://api.bybit.com"]:
-            if alt not in bases:
-                bases.append(alt)
+
+disable_direct_fallback = bool(
+    str(getattr(settings, "BYBIT_DISABLE_DIRECT_FALLBACK", "false")).lower()
+    in ("1", "true", "yes")
+)
+
+if not disable_direct_fallback:
+    for alt in ["https://api.bytick.com", "https://api.bybit.com"]:
+        if alt not in bases:
+            bases.append(alt)
 
         last_error = None
         for base in bases:
