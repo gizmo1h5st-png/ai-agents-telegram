@@ -40,15 +40,53 @@ class BybitPublicClient:
     def __init__(self, base_url: Optional[str] = None):
         self.base_url = (base_url or getattr(settings, "BYBIT_BASE_URL", "https://api.bybit.com")).rstrip("/")
 
+    def _headers(self) -> Dict[str, str]:
+        # Cloudflare/Bybit may return 403 to Python/httpx default user-agent.
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Origin": "https://www.bybit.com",
+            "Referer": "https://www.bybit.com/",
+        }
+
     def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        with httpx.Client(timeout=getattr(settings, "BYBIT_REQUEST_TIMEOUT", 20)) as client:
-            resp = client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("retCode") != 0:
-            raise RuntimeError(f"Bybit error: {data.get('retCode')} {data.get('retMsg')}")
-        return data.get("result") or {}
+        # First try configured proxy/base URL. Then try known public mirrors as fallback.
+        bases = [self.base_url]
+        for alt in ["https://api.bytick.com", "https://api.bybit.com"]:
+            if alt not in bases:
+                bases.append(alt)
+
+        last_error = None
+        for base in bases:
+            url = f"{base}{path}"
+            try:
+                with httpx.Client(timeout=getattr(settings, "BYBIT_REQUEST_TIMEOUT", 20), headers=self._headers()) as client:
+                    resp = client.get(url, params=params)
+
+                if resp.status_code == 403:
+                    body = resp.text[:500]
+                    logger.warning(f"Bybit 403 via {base}: {body}")
+                    last_error = f"403 Forbidden via {base}: {body[:160]}"
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("retCode") != 0:
+                    raise RuntimeError(f"Bybit error via {base}: {data.get('retCode')} {data.get('retMsg')}")
+                return data.get("result") or {}
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Bybit request failed via {base}: {str(e)[:200]}")
+                continue
+
+        raise RuntimeError(f"All Bybit endpoints failed. Last error: {last_error}")
 
     def get_linear_tickers(self) -> Dict[str, TickerInfo]:
         result = self._get("/v5/market/tickers", {"category": "linear"})
@@ -125,4 +163,3 @@ def normalize_timeframe(tf: str) -> str:
     if tf not in BYBIT_INTERVALS:
         raise ValueError(f"Unsupported timeframe: {tf}")
     return tf
-
