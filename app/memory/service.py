@@ -76,4 +76,3 @@ def format_memories(mems) -> str:
             value = value[:350] + "..."
         lines.append(f"<b>[{m.category}]</b> {value}")
     return "\n\n".join(lines)
-
