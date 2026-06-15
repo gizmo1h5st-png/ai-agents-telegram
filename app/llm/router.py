@@ -11,14 +11,13 @@ from app.config import settings, FREE_MODELS
 
 logger = logging.getLogger(__name__)
 
-# Небольшой in-memory кэш внутри процесса Railway.
-# Для production позже лучше заменить на Redis cache.
+# In-process cache (for Railway single-replica)
 _CACHE: "OrderedDict[str, str]" = OrderedDict()
 _CACHE_MAX_SIZE = 150
 _CACHE_TTL_SECONDS = 60 * 30
 _CACHE_TS: Dict[str, float] = {}
 
-# Circuit breaker: если провайдер упал по лимиту/ошибке, временно пропускаем его.
+# Circuit breaker
 _PROVIDER_BLOCKED_UNTIL: Dict[str, float] = {}
 _PROVIDER_LAST_ERROR: Dict[str, str] = {}
 _PROVIDER_STATS: Dict[str, Dict[str, int]] = {}
@@ -85,18 +84,15 @@ def get_provider_for_model(model_id: str) -> str:
         if m["id"] == model_id:
             return m.get("provider", "openrouter")
 
-    # Прямые модели Mistral API.
     if model_id in ("mistral-small-latest", "open-mistral-nemo", "ministral-8b-latest"):
         return "mistral"
 
-    # Популярные OpenAI-compatible модели Groq/Cerebras, если пользователь добавит ключ и модель вручную.
     if model_id.startswith(("llama-", "mixtral-", "gemma-", "qwen-")):
         if settings.GROQ_API_KEY:
             return "groq"
         if settings.CEREBRAS_API_KEY:
             return "cerebras"
 
-    # HF модели часто org/model без :free.
     if "/" in model_id and ":free" not in model_id:
         known_openrouter_prefixes = (
             "openai/", "deepseek/", "meta-llama/", "mistralai/", "google/",
@@ -194,18 +190,15 @@ def _finish_reason(data: Dict[str, Any]) -> str:
 
 
 def _looks_truncated(content: str) -> bool:
-    """Heuristic for providers that don't expose finish_reason reliably."""
     if not content:
         return False
     t = content.rstrip()
-    # Unclosed code fence / JSON / FILE block are common truncation symptoms.
     if t.count("```") % 2 == 1:
         return True
     if "[FILE:" in t and "```" in t and not t.endswith("```"):
         return True
     if t.endswith((",", "и", "или", "что", "который", "которые", "<", "</", "```html")):
         return True
-    # Ends with no sentence/code-ish terminator after a long output.
     if len(t) > 1000 and t[-1] not in ".!?。)]}>`\n":
         return True
     return False
@@ -217,7 +210,6 @@ def _post_chat(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> ht
 
 
 def _continue_content(url: str, headers: Dict[str, str], payload: Dict[str, Any], content: str, max_rounds: int) -> str:
-    """Ask the same model to continue if output was cut by max_tokens."""
     combined = content or ""
     rounds = max(0, int(max_rounds or 0))
     if rounds <= 0:
