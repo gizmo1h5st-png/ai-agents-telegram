@@ -1,3 +1,4 @@
+# Trading loader - safe even if trading is disabled
 from pathlib import Path
 from typing import List, Dict
 
@@ -93,4 +94,3 @@ def build_trading_context(role: str, task_text: str, enabled_strategies: List[st
     if not parts:
         return ""
     return "\n\nTRADING MODE CONTEXT:\n" + "\n\n---\n\n".join(parts)
-
