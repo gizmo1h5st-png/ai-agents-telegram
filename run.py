@@ -8,12 +8,19 @@ def run_bot():
     uvicorn.run("app.main:app", host="0.0.0.0", port=port)
 
 def run_worker():
-    # Worker НЕ запускает ботов
-    os.environ["BOT_COORDINATOR_TOKEN"] = ""
-    os.environ["BOT_RESEARCHER_TOKEN"] = ""
-    os.environ["BOT_CRITIC_TOKEN"] = ""
-    os.environ["BOT_EXECUTOR_TOKEN"] = ""
-    
+    # Worker does NOT start bots
+    # Clear all bot tokens so no accidental polling happens in worker
+    for key in [
+        "TELEGRAM_BOT_TOKEN",
+        "BOT_COORDINATOR_TOKEN",
+        "BOT_RESEARCHER_TOKEN",
+        "BOT_ARCHITECT_TOKEN",
+        "BOT_EXECUTOR_TOKEN",
+        "BOT_QA_TOKEN",
+        "BOT_CRITIC_TOKEN",
+    ]:
+        os.environ[key] = ""
+
     from app.workers.tasks import celery_app
     print("Starting CELERY WORKER...")
     celery_app.worker_main([
