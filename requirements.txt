@@ -21,6 +21,12 @@ python-dotenv==1.0.0
 # Production
 gunicorn==21.2.0
 
+# Search
 ddgs==9.14.2
 
+# GitHub
 PyGithub==2.5.0
+
+# Optional trading (can be removed if not needed)
+# pandas==2.2.2
+# numpy==1.26.4
