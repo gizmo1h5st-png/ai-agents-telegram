@@ -27,7 +27,7 @@ class Task(Base):
     tokens_used = Column(Integer, default=0)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
-    messages = relationship("Message", back_populates="task", cascade="all, delete-orphan")
+    messages = relationship("Message", back_populates="task", cascade="all", delete_orphan)
 
 class Message(Base):
     __tablename__ = "messages"
