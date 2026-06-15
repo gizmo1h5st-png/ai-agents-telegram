@@ -5,6 +5,8 @@ from app.config import settings
 from typing import Optional, List
 from datetime import datetime
 
+import json as _json
+
 async def create_task(chat_id, user_id, description, model=None):
     async with get_session() as session:
         task = Task(chat_id=chat_id, user_id=user_id, description=description,
@@ -121,8 +123,6 @@ async def clear_memories(chat_id):
             await session.delete(m)
         await session.commit()
 
-import json as _json
-
 async def get_agent_models(chat_id):
     async with get_session() as session:
         result = await session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
@@ -148,7 +148,7 @@ async def set_agent_model(chat_id, agent_role, model_id):
                 current = _json.loads(cs.agent_models)
             except:
                 pass
-        
+
         if model_id:
             current[agent_role] = model_id
         elif agent_role in current:
