@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     ALLOWED_USERS: str = ""
     
-    # Multi-bot tokens
+    # Multi-bot tokens (main mode)
     BOT_COORDINATOR_TOKEN: str = ""
     BOT_RESEARCHER_TOKEN: str = ""
     BOT_CRITIC_TOKEN: str = ""
@@ -39,11 +39,11 @@ class Settings(BaseSettings):
     LLM_CONTINUE_MAX: int = 2
     SUMMARIZER_MODEL: str = "mistral-small-latest"
 
-    # GitHub artifact publisher (D5)
+    # GitHub artifact publisher
     GITHUB_TOKEN: str = ""
     GITHUB_REPO: str = ""
     GITHUB_BRANCH: str = "main"
-    GITHUB_BRANCH_MODE: str = "task"  # task | direct
+    GITHUB_BRANCH_MODE: str = "task"
     GITHUB_AUTO_PUSH: bool = False
     GITHUB_CREATE_PR: bool = False
     GITHUB_ALLOWED_PREFIXES: str = "generated/,generated_code/,configs/,docs/,artifacts/"
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     AUTO_TEAM_BY_TASK_TYPE: bool = True
     DEFAULT_TASK_TYPE: str = "general"
 
-    # Trading mode (T2 base, no auto-trading)
+    # Trading mode (fully optional)
     TRADING_MODE_ENABLED: bool = False
     TRADING_MIN_24H_VOLUME: float = 100000.0
     TRADING_ALERTS_ONLY: bool = True
@@ -129,38 +129,37 @@ FREE_MODELS = {
     "mistral-nemo-direct": {"id": "open-mistral-nemo", "name": "🌀 Open Mistral Nemo", "desc": "Mistral API direct", "provider": "mistral"},
     "ministral-8b-direct": {"id": "ministral-8b-latest", "name": "🌀 Ministral 8B", "desc": "Mistral API direct", "provider": "mistral"},
 
-    # === Optional: Groq / Cerebras напрямую (если добавишь ключи) ===
+    # === Optional: Groq / Cerebras напрямую ===
     "groq-llama8b": {"id": "llama-3.1-8b-instant", "name": "⚡ Groq Llama 8B", "desc": "Groq direct", "provider": "groq"},
     "groq-llama70b": {"id": "llama-3.3-70b-versatile", "name": "⚡ Groq Llama 70B", "desc": "Groq direct", "provider": "groq"},
     "cerebras-llama8b": {"id": "llama3.1-8b", "name": "⚡ Cerebras Llama 8B", "desc": "Cerebras direct", "provider": "cerebras"},
 
-    # === OpenRouter / HuggingFace ===
-    "deepseek-r1": {"id": "deepseek/deepseek-r1:free", "name": "🧠 DeepSeek R1", "desc": "Reasoning, логика", "provider": "openrouter"},
-    "deepseek-chat": {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "💬 DeepSeek Chat V3", "desc": "Чат, контент", "provider": "openrouter"},
-    "deepseek-r1-0528": {"id": "deepseek/deepseek-r1-0528:free", "name": "🧠 DeepSeek R1 0528", "desc": "Новый reasoning", "provider": "openrouter"},
-    "deepseek-chat-v31": {"id": "deepseek/deepseek-chat-v3.1:free", "name": "💬 DeepSeek V3.1", "desc": "Новый чат", "provider": "openrouter"},
-    "llama4-maverick": {"id": "meta-llama/llama-4-maverick:free", "name": "🦙 Llama 4 Maverick", "desc": "1M контекст", "provider": "openrouter"},
-    "llama4-scout": {"id": "meta-llama/llama-4-scout:free", "name": "🦙 Llama 4 Scout", "desc": "Быстрый", "provider": "openrouter"},
-    "qwen3": {"id": "qwen/qwen3-235b-a22b:free", "name": "🌟 Qwen3 235B", "desc": "Код и анализ", "provider": "openrouter"},
-    "qwen-coder": {"id": "qwen/qwen3-coder-480b-a35b-instruct:free", "name": "💻 Qwen3 Coder 480B", "desc": "Код", "provider": "openrouter"},
-    "grok-mini": {"id": "x-ai/grok-3-mini-beta:free", "name": "⚡ Grok 3 Mini", "desc": "Быстрый", "provider": "openrouter"},
-    "mistral": {"id": "mistralai/mistral-small-3.1-24b-instruct:free", "name": "🌀 Mistral 24B", "desc": "Баланс", "provider": "openrouter"},
+    # === OpenRouter / HuggingFace (free tier) ===
+    "deepseek-r1": {"id": "deepseek/deepseek-r1:free", "name": "🧠 DeepSeek R1", "desc": "Reasoning", "provider": "openrouter"},
+    "deepseek-chat": {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "💬 DeepSeek Chat V3", "desc": "Chat", "provider": "openrouter"},
+    "deepseek-r1-0528": {"id": "deepseek/deepseek-r1-0528:free", "name": "🧠 DeepSeek R1 0528", "desc": "New reasoning", "provider": "openrouter"},
+    "deepseek-chat-v31": {"id": "deepseek/deepseek-chat-v3.1:free", "name": "💬 DeepSeek V3.1", "desc": "New chat", "provider": "openrouter"},
+    "llama4-maverick": {"id": "meta-llama/llama-4-maverick:free", "name": "🦙 Llama 4 Maverick", "desc": "1M context", "provider": "openrouter"},
+    "llama4-scout": {"id": "meta-llama/llama-4-scout:free", "name": "🦙 Llama 4 Scout", "desc": "Fast", "provider": "openrouter"},
+    "qwen3": {"id": "qwen/qwen3-235b-a22b:free", "name": "🌟 Qwen3 235B", "desc": "Code & analysis", "provider": "openrouter"},
+    "qwen-coder": {"id": "qwen/qwen3-coder-480b-a35b-instruct:free", "name": "💻 Qwen3 Coder 480B", "desc": "Code", "provider": "openrouter"},
+    "grok-mini": {"id": "x-ai/grok-3-mini-beta:free", "name": "⚡ Grok 3 Mini", "desc": "Fast", "provider": "openrouter"},
+    "mistral": {"id": "mistralai/mistral-small-3.1-24b-instruct:free", "name": "🌀 Mistral 24B", "desc": "Balanced", "provider": "openrouter"},
     "gemma3": {"id": "google/gemma-3-27b-it:free", "name": "💎 Gemma 3 27B", "desc": "Google", "provider": "openrouter"},
-    "glm4": {"id": "zhipu-ai/glm-4-32b:free", "name": "🇨🇳 GLM-4 32B", "desc": "Мультиязычная", "provider": "openrouter"},
-    "glm45": {"id": "zhipu-ai/glm-4.5-air:free", "name": "🇨🇳 GLM-4.5 Air", "desc": "Агенты", "provider": "openrouter"},
-    "hermes": {"id": "nousresearch/hermes-3-llama-3.1-70b:free", "name": "🔮 Hermes 70B", "desc": "Ролевые", "provider": "openrouter"},
-    "nemotron-nano": {"id": "nvidia/llama-3.1-nemotron-nano-8b-v1:free", "name": "🟢 Nemotron Nano 8B", "desc": "NVIDIA быстрая", "provider": "openrouter"},
+    "glm4": {"id": "zhipu-ai/glm-4-32b:free", "name": "🇨🇳 GLM-4 32B", "desc": "Multilingual", "provider": "openrouter"},
+    "glm45": {"id": "zhipu-ai/glm-4.5-air:free", "name": "🇨🇳 GLM-4.5 Air", "desc": "Agents", "provider": "openrouter"},
+    "hermes": {"id": "nousresearch/hermes-3-llama-3.1-70b:free", "name": "🔮 Hermes 70B", "desc": "Roleplay", "provider": "openrouter"},
+    "nemotron-nano": {"id": "nvidia/llama-3.1-nemotron-nano-8b-v1:free", "name": "🟢 Nemotron Nano 8B", "desc": "NVIDIA fast", "provider": "openrouter"},
     "kimi": {"id": "moonshotai/kimi-vl-a3b-thinking:free", "name": "🌙 Kimi Thinking", "desc": "Thinking", "provider": "openrouter"},
-    "devstral": {"id": "mistralai/devstral-2-2512:free", "name": "🌀 Devstral 2", "desc": "Код от Mistral", "provider": "openrouter"},
-    # === HuggingFace ===
+    "devstral": {"id": "mistralai/devstral-2-2512:free", "name": "🌀 Devstral 2", "desc": "Code from Mistral", "provider": "openrouter"},
+    # HF
     "hf-deepseek": {"id": "deepseek-ai/DeepSeek-R1", "name": "🧠 HF DeepSeek R1", "desc": "HuggingFace", "provider": "huggingface"},
     "hf-llama": {"id": "meta-llama/Llama-3.1-8B-Instruct", "name": "🦙 HF Llama 3.1", "desc": "HuggingFace", "provider": "huggingface"},
     "hf-qwen": {"id": "Qwen/Qwen2.5-72B-Instruct", "name": "🌟 HF Qwen 72B", "desc": "HuggingFace", "provider": "huggingface"},
 }
 
 
-# Правильные usernames Telegram-ботов агентов.
-# ВНИМАНИЕ: username координатора именно @coordintor_ai_bot без второй буквы "a".
+# Correct usernames (note the intentional typo in coordinator)
 AGENT_USERNAMES = {
     "coordinator": "@coordintor_ai_bot",
     "researcher": "@Researcher1_ai_bot",
