@@ -43,7 +43,6 @@ CONTEXT_FILES = ["PROJECT.md", "AGENTS.md", "DEPLOYMENT.md"]
 def list_skills() -> Dict[str, dict]:
     return SKILL_REGISTRY
 
-
 def read_skill(skill_id: str) -> str:
     meta = SKILL_REGISTRY.get(skill_id)
     if not meta:
@@ -52,7 +51,6 @@ def read_skill(skill_id: str) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
-
 
 def select_skills_for_task(task: str, enabled: List[str] | None = None, limit: int = 4) -> List[str]:
     text = (task or "").lower()
@@ -67,7 +65,6 @@ def select_skills_for_task(task: str, enabled: List[str] | None = None, limit: i
     scored.sort(reverse=True)
     return [sid for _score, sid in scored[:limit]]
 
-
 def build_skills_context(skill_ids: List[str]) -> str:
     parts = []
     for sid in skill_ids:
@@ -79,14 +76,14 @@ def build_skills_context(skill_ids: List[str]) -> str:
         return ""
     return "\n\nНАВЫКИ, РЕЛЕВАНТНЫЕ ЗАДАЧЕ:\n" + "\n\n---\n\n".join(parts)
 
-
 def read_context_files() -> str:
     parts = []
     for fname in CONTEXT_FILES:
         path = CONTEXT_DIR / fname
         if path.exists():
-            parts.append(f"## {fname}\n{path.read_text(encoding='utf-8')}")
+            content = path.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(f"## {fname}\n{content}")
     if not parts:
         return ""
     return "\n\nПОСТОЯННЫЙ КОНТЕКСТ ПРОЕКТА:\n" + "\n\n---\n\n".join(parts)
-
