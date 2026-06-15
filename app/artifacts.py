@@ -12,15 +12,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Supported safe formats:
-# 1) [FILE: generated_code/example.py]
-#    ```python
-#    ...
-#    ```
-# 2) same, but missing closing ```
-#
-# No-fence fallback is intentionally disabled by default because it can capture
-# user prompts / feedback instructions as a file body.
 FILE_BLOCK_RE = re.compile(
     r"\[FILE:\s*(?P<path>[^\]]+)\]\s*```(?P<lang>[a-zA-Z0-9_+.-]*)?\s*(?P<content>[\s\S]*?)```",
     re.MULTILINE,
@@ -55,16 +46,12 @@ def _allowed_prefixes() -> list[str]:
 
 
 def _allow_unfenced_artifacts() -> bool:
-    # Default True after strict prompt-leak/placeholder/content validation.
-    # Set GITHUB_ALLOW_UNFENCED_ARTIFACTS=false to require fenced code blocks only.
     return bool(getattr(settings, "GITHUB_ALLOW_UNFENCED_ARTIFACTS", True))
 
 
 def _normalize_raw_path(path: str) -> str:
     path = html.unescape(path or "").strip()
-    # Telegram/LLM may turn PROJECT_AUDIT.md into PROJECT_[AUDIT.md](http://AUDIT.md).
-    # Inside [FILE: ...] we want the visible link text, not markdown URL.
-    path = re.sub(r"\[([^\]]+)\]\((?:https?://)?[^)]+\)", r"\1", path)
+    path = re.sub(r"\[([^]]+)\]\((?:https?://)?[^)]+\)", r"\1", path)
     path = path.replace("`", "").strip()
     return path
 
@@ -107,7 +94,6 @@ def _looks_like_file_content(path: str, content: str) -> bool:
         unescaped = html.unescape(c).lower()
         return "<html" in unescaped or "<!doctype" in unescaped
     if suffix == ".md":
-        # Require at least a real heading/list/content, not just "..." or prompt residue.
         return ("#" in c or "- " in c or len(c) > 120) and "..." != c.replace("\n", "").strip()
     if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".css", ".txt"}:
         return True
@@ -118,14 +104,12 @@ def _is_placeholder_or_prompt_leak(content: str) -> bool:
     c = (content or "").strip()
     lower = c.lower()
 
-    # Placeholder-only / low-value body.
     compact = re.sub(r"\s+", "", lower)
     if compact in {"...", "…", "todo", "tbd", "projectaudit..."}:
         return True
-    if re.fullmatch(r"[#\s]*project audit\s*(\.\.\.|…)?", lower, flags=re.IGNORECASE):
+    if re.fullmatch(r"[#\s]*project audit\s*(\.\.\.|\…)?", lower, flags=re.IGNORECASE):
         return True
 
-    # Prompt / feedback leakage. These must never be committed as artifacts.
     forbidden_fragments = [
         "инструкция агенту:",
         "обязательно учти это замечание",
@@ -144,20 +128,16 @@ def _is_placeholder_or_prompt_leak(content: str) -> bool:
 
 
 def _normalize_artifact_content(content: str) -> str:
-    """Normalize content captured from Telegram/LLM output."""
     content = html.unescape(content or "")
-
-    # Remove accidental leading language line in no-fence fallback.
     lines = content.strip().splitlines()
     if lines and lines[0].strip().lower() in {"html", "python", "py", "javascript", "js", "typescript", "ts", "json", "yaml", "yml", "css", "md", "markdown"}:
         lines = lines[1:]
         content = "\n".join(lines)
 
-    # If model forgot closing fence and then continued with normal prose, cut common markers.
     stop_markers = [
         "\n\nQA:", "\n\nКритик", "\n\nАрхитектор", "\n\nИсполнитель", "\n\nКоординатор",
         "\n\nПроверка", "\n\nВывод", "\n\nПередаю", "\n```",
-        "\n\n⚠️ Финализация", "\n⚠️ Финализация",
+        "\n\n⚠️ Финализация", "⚠️ Финализация",
         "\n\nИнструкция агенту:", "\nИнструкция агенту:",
         "\n\nБез изменения других файлов", "\nБез изменения других файлов",
     ]
@@ -177,7 +157,6 @@ def _overlaps(span: Tuple[int, int], spans: List[Tuple[int, int]]) -> bool:
 
 
 def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
-    """Return list of (path, content) from closed/unclosed FILE blocks."""
     text = text or ""
     matches: List[Tuple[str, str]] = []
     spans: List[Tuple[int, int]] = []
@@ -193,7 +172,6 @@ def _iter_file_matches(text: str) -> List[Tuple[str, str]]:
         matches.append((match.group("path"), match.group("content") or ""))
         spans.append(span)
 
-    # Last-resort fallback when model omitted ``` entirely. Disabled by default.
     if _allow_unfenced_artifacts():
         for match in FILE_BLOCK_NO_FENCE_RE.finditer(text):
             span = match.span()
