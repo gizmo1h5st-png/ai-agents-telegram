@@ -16,7 +16,7 @@ async def lifespan(app: FastAPI):
     global polling_tasks
     
     if settings.multi_bot_mode:
-        # Multi-bot mode
+        # Multi-bot mode (recommended)
         import redis.asyncio as aioredis
         from app.multibot.engine import AgentBot
         from app.db.session import init_db
@@ -24,9 +24,8 @@ async def lifespan(app: FastAPI):
         await init_db()
         redis_client = aioredis.from_url(settings.REDIS_URL)
 
-        # Telegram getUpdates допускает только ОДИН poller на один bot token.
-        # На Railway во время redeploy/scale может на несколько секунд существовать 2 контейнера.
-        # Этот Redis-lock не даёт второму контейнеру запускать polling и ловить TelegramConflictError.
+        # Telegram getUpdates allows only ONE poller per bot token.
+        # This Redis lock prevents conflicts during deploys on Railway.
         instance_id = f"{os.environ.get('RAILWAY_DEPLOYMENT_ID', '')}:{uuid.uuid4()}"
         lock_key = "ai_agents_telegram:multi_bot_polling_lock"
         lock_ttl = int(os.environ.get("POLLING_LOCK_TTL", "45"))
@@ -34,7 +33,6 @@ async def lifespan(app: FastAPI):
         lock_acquired = False
         lock_refresher = None
 
-        # Emergency only: set CLEAR_POLLING_LOCK_ON_START=true once if Railway left a stale lock.
         if os.environ.get("CLEAR_POLLING_LOCK_ON_START", "").lower() in ("1", "true", "yes"):
             old_owner = await redis_client.get(lock_key)
             await redis_client.delete(lock_key)
@@ -104,7 +102,7 @@ async def lifespan(app: FastAPI):
         await redis_client.close()
     
     else:
-        # Single-bot mode (backward compatible)
+        # Single-bot mode (legacy)
         from aiogram import Bot, Dispatcher
         from app.bot.handlers import router
         from app.db.session import init_db
