@@ -12,49 +12,31 @@ logger = logging.getLogger(__name__)
 polling_tasks = []
 agent_bots = []
 redis_client = None
-polling_lock_key = "ai_agents_telegram:multi_bot_polling_lock"
+
+POLLING_LOCK_KEY = "ai_agents_telegram:multi_bot_polling_lock"
 polling_instance_id = None
 polling_lock_acquired = False
 polling_started = False
 
 
-async def _polling_watchdog(app: FastAPI):
-    """If any polling task dies while FastAPI is alive, restart the container.
-
-    Without this, /health may stay OK while Telegram bots are dead.
-    Railway will restart the service when the process exits non-zero.
-    """
-    await asyncio.sleep(15)
-    while True:
-        try:
-            if polling_started and polling_tasks:
-                dead = [t for t in polling_tasks if t.done()]
-                if dead:
-                    for t in dead:
-                        try:
-                            exc = t.exception()
-                        except Exception as e:
-                            exc = e
-                        logger.error(f"Polling task stopped unexpectedly: {exc}")
-                    logger.error("Exiting process because polling task died")
-                    os._exit(1)
-        except Exception as e:
-            logger.error(f"Polling watchdog error: {e}")
-        await asyncio.sleep(10)
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "y", "on")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global polling_tasks, agent_bots, redis_client, polling_instance_id, polling_lock_acquired, polling_started
+    global polling_tasks, agent_bots, redis_client
+    global polling_instance_id, polling_lock_acquired, polling_started
 
     polling_tasks = []
     agent_bots = []
     redis_client = None
-    polling_instance_id = None
     polling_lock_acquired = False
     polling_started = False
-
-    watchdog_task = None
+    polling_instance_id = f"{os.environ.get('RAILWAY_DEPLOYMENT_ID', '')}:{uuid.uuid4()}"
     lock_refresher = None
 
     if settings.multi_bot_mode:
@@ -65,24 +47,31 @@ async def lifespan(app: FastAPI):
         await init_db()
         redis_client = aioredis.from_url(settings.REDIS_URL)
 
-        polling_instance_id = f"{os.environ.get('RAILWAY_DEPLOYMENT_ID', '')}:{uuid.uuid4()}"
         lock_ttl = int(os.environ.get("POLLING_LOCK_TTL", "45"))
-        lock_wait = int(os.environ.get("POLLING_LOCK_WAIT", "180"))
+        lock_wait = int(os.environ.get("POLLING_LOCK_WAIT", "60"))
+        clear_on_start = _env_bool("CLEAR_POLLING_LOCK_ON_START", False)
+        force_clear_wait = int(os.environ.get("POLLING_FORCE_CLEAR_WAIT", "20"))
 
-        if os.environ.get("CLEAR_POLLING_LOCK_ON_START", "").lower() in ("1", "true", "yes"):
-            old_owner = await redis_client.get(polling_lock_key)
-            await redis_client.delete(polling_lock_key)
-            logger.warning(f"FORCE CLEARED old lock: {old_owner.decode() if old_owner else 'None'}")
+        if clear_on_start:
+            old_owner = await redis_client.get(POLLING_LOCK_KEY)
+            await redis_client.delete(POLLING_LOCK_KEY)
+            logger.warning(
+                f"FORCE CLEARED old polling lock: {old_owner.decode() if old_owner else 'None'}; "
+                f"waiting {force_clear_wait}s before acquiring to let old poller stop"
+            )
+            # Important: old container may still be polling for a few seconds.
+            # Waiting avoids TelegramConflictError after force-clearing the lock.
+            await asyncio.sleep(force_clear_wait)
 
         for attempt in range(lock_wait):
             polling_lock_acquired = bool(
-                await redis_client.set(polling_lock_key, polling_instance_id, nx=True, ex=lock_ttl)
+                await redis_client.set(POLLING_LOCK_KEY, polling_instance_id, nx=True, ex=lock_ttl)
             )
             if polling_lock_acquired:
                 logger.info(f"✅ Polling lock acquired: {polling_instance_id}")
                 break
 
-            owner = await redis_client.get(polling_lock_key)
+            owner = await redis_client.get(POLLING_LOCK_KEY)
             if attempt == 0 or (attempt + 1) % 5 == 0:
                 logger.warning(
                     f"Another bot polling instance is active. Waiting... "
@@ -94,12 +83,16 @@ async def lifespan(app: FastAPI):
             while True:
                 await asyncio.sleep(max(10, lock_ttl // 3))
                 try:
-                    owner = await redis_client.get(polling_lock_key)
+                    owner = await redis_client.get(POLLING_LOCK_KEY)
                     if owner and owner.decode() == polling_instance_id:
-                        await redis_client.expire(polling_lock_key, lock_ttl)
+                        await redis_client.expire(POLLING_LOCK_KEY, lock_ttl)
                     else:
-                        logger.error("Lost polling lock. Exiting so Railway restarts this container.")
-                        os._exit(1)
+                        # Do not kill the whole FastAPI process here.
+                        # Just stop refreshing. Health will show degraded if polling is not active.
+                        logger.error("Lost polling lock. Lock refresher stopped.")
+                        return
+                except asyncio.CancelledError:
+                    return
                 except Exception as e:
                     logger.error(f"Polling lock refresh error: {e}")
 
@@ -114,7 +107,6 @@ async def lifespan(app: FastAPI):
 
         if polling_lock_acquired:
             lock_refresher = asyncio.create_task(refresh_lock())
-
             for role, token in bots_config.items():
                 if token:
                     bot = AgentBot(role, token, redis_client)
@@ -124,25 +116,27 @@ async def lifespan(app: FastAPI):
 
             polling_started = bool(polling_tasks)
             logger.info(f"Multi-bot mode: {len(agent_bots)} bots started (lock={polling_instance_id})")
-            watchdog_task = asyncio.create_task(_polling_watchdog(app))
         else:
-            logger.error("Could not acquire polling lock. This container will NOT start Telegram polling.")
+            # Let FastAPI start, but report degraded health.
+            # This avoids 502 during lock wait and makes diagnosis easier.
+            logger.error("Could not acquire polling lock. FastAPI will start, Telegram polling will NOT run in this container.")
 
         yield
 
         logger.info("Application shutdown: stopping bot polling tasks")
-        if watchdog_task:
-            watchdog_task.cancel()
         for task in polling_tasks:
             task.cancel()
         for bot in agent_bots:
-            await bot.stop()
+            try:
+                await bot.stop()
+            except Exception as e:
+                logger.warning(f"Bot stop failed: {e}")
         if lock_refresher:
             lock_refresher.cancel()
         try:
-            owner = await redis_client.get(polling_lock_key)
+            owner = await redis_client.get(POLLING_LOCK_KEY)
             if owner and owner.decode() == polling_instance_id:
-                await redis_client.delete(polling_lock_key)
+                await redis_client.delete(POLLING_LOCK_KEY)
                 logger.info("Polling lock released")
         except Exception as e:
             logger.error(f"Polling lock release error: {e}")
@@ -157,19 +151,14 @@ async def lifespan(app: FastAPI):
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
         dp = Dispatcher()
         dp.include_router(router)
-
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Single-bot mode: Bot ready!")
-
         task = asyncio.create_task(dp.start_polling(bot))
         polling_tasks.append(task)
         polling_started = True
-        watchdog_task = asyncio.create_task(_polling_watchdog(app))
 
         yield
 
-        if watchdog_task:
-            watchdog_task.cancel()
         for t in polling_tasks:
             t.cancel()
         await bot.session.close()
@@ -182,6 +171,7 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     tasks_total = len(polling_tasks)
     tasks_alive = sum(1 for t in polling_tasks if not t.done())
+
     ok = True
     reason = "ok"
 
